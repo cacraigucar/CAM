@@ -1,4 +1,4 @@
-o   # CAM: The Community Atmosphere Model
+# CAM: The Community Atmosphere Model
 
 ## NOTE: This is **unsupported** development code and is subject to the [CESM developer's agreement](http://www.cgd.ucar.edu/cseg/development-code.html).
 
