@@ -378,10 +378,10 @@ contains
           call endrun (errstring)
        end if
 
-       ! Apply the ALI-ARMS heating rate to the qrlf summation
-       qrlf(:ncol,:) = 0._r8
-       qrlaliarms(:ncol,:) = qrlaliarms(:ncol,:) * cpairv(:ncol,:,lchnk)
-       qrlf(:ncol,:) = o3cool(:ncol,:) + qrlaliarms(:ncol,:)
+!!!!!!!!!!!!!!!       ! Apply the ALI-ARMS heating rate to the qrlf summation
+!!!!!!!!!!!!!!!       qrlf(:ncol,:) = 0._r8
+!!!!!!!!!!!!!!!       qrlaliarms(:ncol,:) = qrlaliarms(:ncol,:) * cpairv(:ncol,:,lchnk)
+!!!!!!!!!!!!!!!       qrlf(:ncol,:) = o3cool(:ncol,:) + qrlaliarms(:ncol,:)
 
     else
 
