@@ -383,6 +383,9 @@ contains
 !!!!!!!!!!!!!!!       qrlaliarms(:ncol,:) = qrlaliarms(:ncol,:) * cpairv(:ncol,:,lchnk)
 !!!!!!!!!!!!!!!       qrlf(:ncol,:) = o3cool(:ncol,:) + qrlaliarms(:ncol,:)
 
+       qrlf(:ncol,:) = 0._r8
+       qrlf(:ncol,:) = qrlfomichev(:ncol,:)
+
     else
 
        qrlf(:ncol,:) = 0._r8
