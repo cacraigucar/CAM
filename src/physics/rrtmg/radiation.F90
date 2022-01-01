@@ -318,9 +318,9 @@ real(r8) function radiation_nextsw_cday(init)
    use phys_control,   only: cam_physpkg_is 
   
    ! Return calendar day of next sw radiation calculation
+   logical, intent(in), optional :: init
 
    ! Local variables
-   logical, intent(in), optional :: init
    logical :: doinit     ! flag indicating call occurs during initialization
    integer :: nstep      ! timestep counter
    logical :: dosw       ! true => do shosrtwave calc   
