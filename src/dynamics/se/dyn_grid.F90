@@ -546,9 +546,10 @@ subroutine physgrid_copy_attributes_d(gridname, grid_attribute_names)
       grid_attribute_names(2) = 'ne'
    else
       gridname = 'GLL'
-      allocate(grid_attribute_names(2))
+      allocate(grid_attribute_names(3))
       grid_attribute_names(1) = 'np'
       grid_attribute_names(2) = 'ne'
+      grid_attribute_names(3) = 'area'
    end if
 
 end subroutine physgrid_copy_attributes_d
@@ -796,9 +797,9 @@ subroutine define_cam_grids()
 
    ! If using the physics grid then the GLL grid will use the names with
    ! '_d' suffixes and the physics grid will use the unadorned names.
-   ! This allows fields on both the GLL and physics grids to be written to history
-   ! output files.
-   if (trim(ini_grid_hdim_name) == 'ncol_d') then
+   ! This allows fields on both the GLL and physics grids to be written to
+   ! history output files.
+   if (fv_nphys > 0) then
       latname  = 'lat_d'
       lonname  = 'lon_d'
       ncolname = 'ncol_d'
@@ -809,13 +810,13 @@ subroutine define_cam_grids()
       ncolname = 'ncol'
       areaname = 'area'
    end if
-   lat_coord => horiz_coord_create('lat_d', 'ncol_d', ngcols_d,  &
+   lat_coord => horiz_coord_create(trim(latname), trim(ncolname), ngcols_d,   &
          'latitude', 'degrees_north', 1, size(pelat_deg), pelat_deg, map=pemap)
-   lon_coord => horiz_coord_create('lon_d', 'ncol_d', ngcols_d,  &
+   lon_coord => horiz_coord_create(trim(lonname), trim(ncolname), ngcols_d,   &
          'longitude', 'degrees_east', 1, size(pelon_deg), pelon_deg, map=pemap)
 
    ! Map for GLL grid
-   allocate(grid_map(3,npsq*nelemd))
+   allocate(grid_map(3, npsq*nelemd))
    grid_map = 0_iMap
    mapind = 1
    do j = 1, nelemd
@@ -828,30 +829,28 @@ subroutine define_cam_grids()
    end do
 
    ! The native SE GLL grid
-   call cam_grid_register('GLL', dyn_decomp, lat_coord, lon_coord,           &
+   call cam_grid_register('GLL', dyn_decomp, lat_coord, lon_coord,            &
          grid_map, block_indexed=.false., unstruct=.true.)
-   call cam_grid_attribute_register('GLL', 'area_d', 'gll grid areas', &
-         'ncol_d', pearea, map=pemap)
+   call cam_grid_attribute_register('GLL', trim(areaname), 'gll grid areas',  &
+         trim(ncolname), pearea, map=pemap)
    call cam_grid_attribute_register('GLL', 'np', '', np)
    call cam_grid_attribute_register('GLL', 'ne', '', ne)
 
    ! If dim name is 'ncol', create INI grid
    ! We will read from INI grid, but use GLL grid for all output
    if (trim(ini_grid_hdim_name) == 'ncol') then
-
-      lat_coord => horiz_coord_create('lat', 'ncol', ngcols_d,  &
+      lat_coord => horiz_coord_create('lat', 'ncol', ngcols_d,                &
          'latitude', 'degrees_north', 1, size(pelat_deg), pelat_deg, map=pemap)
-      lon_coord => horiz_coord_create('lon', 'ncol', ngcols_d,  &
+      lon_coord => horiz_coord_create('lon', 'ncol', ngcols_d,                &
          'longitude', 'degrees_east', 1, size(pelon_deg), pelon_deg, map=pemap)
 
       call cam_grid_register('INI', ini_decomp, lat_coord, lon_coord,         &
          grid_map, block_indexed=.false., unstruct=.true.)
-      call cam_grid_attribute_register('INI', 'area', 'ini grid areas', &
+      call cam_grid_attribute_register('INI', 'area', 'ini grid areas',       &
                'ncol', pearea, map=pemap)
-
       ini_grid_name = 'INI'
    else
-      ! The dyn_decomp grid can be used to read the initial file.
+      ! The dyn_decomp output grid can be used to read the initial file.
       ini_grid_name = 'GLL'
    end if
 
