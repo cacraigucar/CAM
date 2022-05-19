@@ -95,6 +95,7 @@ use ref_pres,       only: top_lev=>trop_cloud_top_lev
 
 use subcol_utils,   only: subcol_get_scheme
 
+
 implicit none
 private
 save
@@ -401,12 +402,21 @@ end subroutine micro_mg_cam_readnl
 !================================================================================================
 
 subroutine micro_mg_cam_register
-
+!++ TAU
+!use stochastic_collect_tau_cam,  only: ncd, diammean, diamedge
+!use cam_history_support, only: add_hist_coord
+!-- TAU
    ! Register microphysics constituents and fields in the physics buffer.
    !-----------------------------------------------------------------------
 
    logical :: prog_modal_aero
    logical :: use_subcol_microp  ! If true, then are using subcolumns in microphysics
+
+!++ TAU
+!   call add_hist_coord('bins_ncd', ncd, 'bins for TAU microphysics')
+!   call add_hist_coord('bins_ncd', ncd, 'bins for TAU microphysics', 'cm', &
+!                        diammean, bounds_name = 'bins_ncd_bnds', bounds = diamedge )
+!-- TAU  
 
    call phys_getopts(use_subcol_microp_out    = use_subcol_microp, &
                      prog_modal_aero_out      = prog_modal_aero)
@@ -798,6 +808,8 @@ subroutine micro_mg_cam_init(pbuf2d)
    call addfld ('MPDQ',       (/ 'lev' /), 'A', 'kg/kg/s',  'Q tendency - Morrison microphysics'                      )
    call addfld ('MPDLIQ',     (/ 'lev' /), 'A', 'kg/kg/s',  'CLDLIQ tendency - Morrison microphysics'                 )
    call addfld ('MPDICE',     (/ 'lev' /), 'A', 'kg/kg/s',  'CLDICE tendency - Morrison microphysics'                 )
+   call addfld ('MPDNC',      (/ 'lev' /), 'A', '#/kg/s',   'nc tendency - Morrison microphysics'                 )
+   call addfld ('MPDNI',      (/ 'lev' /), 'A', '#/kg/s',   'nitendency - Morrison microphysics'                 )
    call addfld ('MPDW2V',     (/ 'lev' /), 'A', 'kg/kg/s',  'Water <--> Vapor tendency - Morrison microphysics'       )
    call addfld ('MPDW2I',     (/ 'lev' /), 'A', 'kg/kg/s',  'Water <--> Ice tendency - Morrison microphysics'         )
    call addfld ('MPDW2P',     (/ 'lev' /), 'A', 'kg/kg/s',  'Water <--> Precip tendency - Morrison microphysics'      )
@@ -1090,6 +1102,7 @@ subroutine micro_mg_cam_tend(state, ptend, dtime, pbuf)
    use micro_mg1_0, only: micro_mg_get_cols1_0 => micro_mg_get_cols
    use micro_mg2_0, only: micro_mg_get_cols2_0 => micro_mg_get_cols
 
+
    type(physics_state),         intent(in)    :: state
    type(physics_ptend),         intent(out)   :: ptend
    real(r8),                    intent(in)    :: dtime
@@ -1132,7 +1145,9 @@ subroutine micro_mg_cam_tend_pack(state, ptend, dtime, pbuf, mgncol, mgcols, nle
    use subcol,          only: subcol_field_avg
    use tropopause,      only: tropopause_find, TROP_ALG_CPP, TROP_ALG_NONE, NOTFOUND
    use wv_saturation,   only: qsat
-
+!++ TAU
+   use stochastic_collect_tau_cam, only: ncd
+!-- TAU
    type(physics_state),         intent(in)    :: state
    type(physics_ptend),         intent(out)   :: ptend
    real(r8),                    intent(in)    :: dtime
@@ -1259,6 +1274,78 @@ subroutine micro_mg_cam_tend_pack(state, ptend, dtime, pbuf, mgncol, mgcols, nle
    real(r8), target :: freqr(state%psetcols,pver)
    real(r8), target :: nfice(state%psetcols,pver)
    real(r8), target :: qcrat(state%psetcols,pver)   ! qc limiter ratio (1=no limit)
+!++ TAU
+   real(r8), target :: scale_qc(state%psetcols,pver)
+   real(r8), target :: scale_nc(state%psetcols,pver)
+   real(r8), target :: scale_qr(state%psetcols,pver)
+   real(r8), target :: scale_nr(state%psetcols,pver)
+   real(r8) :: amk_c(state%psetcols,pver,ncd)
+   real(r8) :: ank_c(state%psetcols,pver,ncd)
+   real(r8) :: amk_r(state%psetcols,pver,ncd)
+   real(r8) :: ank_r(state%psetcols,pver,ncd)
+   real(r8) :: amk(state%psetcols,pver,ncd)
+   real(r8) :: ank(state%psetcols,pver,ncd)
+   real(r8) :: amk_out(state%psetcols,pver,ncd)
+   real(r8) :: ank_out(state%psetcols,pver,ncd)
+   real(r8), target :: qc_out(state%psetcols,pver)
+   real(r8), target :: nc_out(state%psetcols,pver) 
+   real(r8), target :: qr_out(state%psetcols,pver)
+   real(r8), target :: nr_out(state%psetcols,pver)
+   real(r8), target :: qctend_MG2(state%psetcols,pver)
+   real(r8), target :: nctend_MG2(state%psetcols,pver)
+   real(r8), target :: qrtend_MG2(state%psetcols,pver)
+   real(r8), target :: nrtend_MG2(state%psetcols,pver)  
+   real(r8), target :: qctend_TAU(state%psetcols,pver)
+   real(r8), target :: nctend_TAU(state%psetcols,pver)
+   real(r8), target :: qrtend_TAU(state%psetcols,pver)
+   real(r8), target :: nrtend_TAU(state%psetcols,pver)  
+   real(r8), target :: qctend_TAU_diag(state%psetcols,pver)
+   real(r8), target :: nctend_TAU_diag(state%psetcols,pver)
+   real(r8), target :: qrtend_TAU_diag(state%psetcols,pver)
+   real(r8), target :: nrtend_TAU_diag(state%psetcols,pver) 
+   real(r8), target :: gmnnn_lmnnn_TAU(state%psetcols,pver)  
+   real(r8), target :: ML_fixer(state%psetcols,pver)
+   real(r8), target :: qc_fixer(state%psetcols,pver)
+   real(r8), target :: nc_fixer(state%psetcols,pver)
+   real(r8), target :: qr_fixer(state%psetcols,pver)
+   real(r8), target :: nr_fixer(state%psetcols,pver)
+
+
+   real(r8) :: packed_scale_qc(mgncol,nlev)
+   real(r8) :: packed_scale_nc(mgncol,nlev)
+   real(r8) :: packed_scale_qr(mgncol,nlev)
+   real(r8) :: packed_scale_nr(mgncol,nlev)
+   real(r8) :: packed_amk_c(mgncol,nlev,ncd)
+   real(r8) :: packed_ank_c(mgncol,nlev,ncd)
+   real(r8) :: packed_amk_r(mgncol,nlev,ncd)
+   real(r8) :: packed_ank_r(mgncol,nlev,ncd)
+   real(r8) :: packed_amk(mgncol,nlev,ncd)
+   real(r8) :: packed_ank(mgncol,nlev,ncd)
+   real(r8) :: packed_amk_out(mgncol,nlev,ncd)
+   real(r8) :: packed_ank_out(mgncol,nlev,ncd)
+   real(r8) :: packed_qc_out(mgncol,nlev)
+   real(r8) :: packed_nc_out(mgncol,nlev)
+   real(r8) :: packed_qr_out(mgncol,nlev)
+   real(r8) :: packed_nr_out(mgncol,nlev)
+   real(r8) :: packed_qctend_MG2(mgncol,nlev)
+   real(r8) :: packed_nctend_MG2(mgncol,nlev)
+   real(r8) :: packed_qrtend_MG2(mgncol,nlev)
+   real(r8) :: packed_nrtend_MG2(mgncol,nlev)
+   real(r8) :: packed_qctend_TAU(mgncol,nlev)
+   real(r8) :: packed_nctend_TAU(mgncol,nlev)
+   real(r8) :: packed_qrtend_TAU(mgncol,nlev)
+   real(r8) :: packed_nrtend_TAU(mgncol,nlev)
+   real(r8) :: packed_qctend_TAU_diag(mgncol,nlev)
+   real(r8) :: packed_nctend_TAU_diag(mgncol,nlev)
+   real(r8) :: packed_qrtend_TAU_diag(mgncol,nlev)
+   real(r8) :: packed_nrtend_TAU_diag(mgncol,nlev)
+   real(r8) :: packed_gmnnn_lmnnn_TAU(mgncol,nlev)
+   real(r8) :: packed_ML_fixer(mgncol,nlev)
+   real(r8) :: packed_qc_fixer(mgncol,nlev)
+   real(r8) :: packed_nc_fixer(mgncol,nlev)
+   real(r8) :: packed_qr_fixer(mgncol,nlev)
+   real(r8) :: packed_nr_fixer(mgncol,nlev)
+!-- TAU
 
    ! Object that packs columns with clouds/precip.
    type(MGPacker) :: packer
@@ -2035,6 +2122,44 @@ subroutine micro_mg_cam_tend_pack(state, ptend, dtime, pbuf, mgncol, mgcols, nle
       packed_frzdep = packer%pack(frzdep)
    end if
 
+!++ TAU
+   call post_proc%add_field(p(qc_out), p(packed_qc_out))
+   call post_proc%add_field(p(nc_out), p(packed_nc_out))
+   call post_proc%add_field(p(qr_out), p(packed_qr_out))
+   call post_proc%add_field(p(nr_out), p(packed_nr_out))
+   call post_proc%add_field(p(scale_qc), p(packed_scale_qc))   
+   call post_proc%add_field(p(scale_nc), p(packed_scale_nc))
+   call post_proc%add_field(p(scale_qr), p(packed_scale_qr))   
+   call post_proc%add_field(p(scale_nr), p(packed_scale_nr))
+   call post_proc%add_field(p(qctend_MG2), p(packed_qctend_MG2))
+   call post_proc%add_field(p(nctend_MG2), p(packed_nctend_MG2))
+   call post_proc%add_field(p(qrtend_MG2), p(packed_qrtend_MG2))
+   call post_proc%add_field(p(nrtend_MG2), p(packed_nrtend_MG2))
+   call post_proc%add_field(p(qctend_TAU), p(packed_qctend_TAU))
+   call post_proc%add_field(p(nctend_TAU), p(packed_nctend_TAU))
+   call post_proc%add_field(p(qrtend_TAU), p(packed_qrtend_TAU))
+   call post_proc%add_field(p(nrtend_TAU), p(packed_nrtend_TAU))
+   call post_proc%add_field(p(qctend_TAU_diag), p(packed_qctend_TAU_diag))
+   call post_proc%add_field(p(nctend_TAU_diag), p(packed_nctend_TAU_diag))
+   call post_proc%add_field(p(qrtend_TAU_diag), p(packed_qrtend_TAU_diag))
+   call post_proc%add_field(p(nrtend_TAU_diag), p(packed_nrtend_TAU_diag))
+   call post_proc%add_field(p(gmnnn_lmnnn_TAU), p(packed_gmnnn_lmnnn_TAU))
+   call post_proc%add_field(p(ML_fixer), p(packed_ML_fixer))
+   call post_proc%add_field(p(qc_fixer), p(packed_qc_fixer))
+   call post_proc%add_field(p(nc_fixer), p(packed_nc_fixer)) 
+   call post_proc%add_field(p(qr_fixer), p(packed_qr_fixer))
+   call post_proc%add_field(p(nr_fixer), p(packed_nr_fixer))
+
+   amk_c = 0._r8
+   ank_c = 0._r8
+   amk_r = 0._r8
+   ank_r = 0._r8
+   amk = 0._r8
+   ank = 0._r8
+   amk_out = 0._r8
+   ank_out = 0._r8
+!-- TAU
+
    do it = 1, num_steps
 
       ! Pack input variables that are updated during substeps.
@@ -2140,7 +2265,17 @@ subroutine micro_mg_cam_tend_pack(state, ptend, dtime, pbuf, mgncol, mgcols, nle
                  errstring, &
                  packed_tnd_qsnow,packed_tnd_nsnow,packed_re_ice,&
                  packed_prer_evap,                                     &
-                 packed_frzimm,  packed_frzcnt,  packed_frzdep   )
+                 packed_frzimm,  packed_frzcnt,  packed_frzdep,  &
+!++ TAU
+                 packed_scale_qc, packed_scale_nc, packed_scale_qr, packed_scale_nr, &
+                 packed_amk_c, packed_ank_c, packed_amk_r, packed_ank_r,             & 
+                 packed_amk, packed_ank, packed_amk_out, packed_ank_out, &
+                 packed_qc_out, packed_nc_out, packed_qr_out, packed_nr_out, &
+                 packed_qctend_MG2, packed_nctend_MG2, packed_qrtend_MG2, packed_nrtend_MG2, &
+                 packed_qctend_TAU, packed_nctend_TAU, packed_qrtend_TAU, packed_nrtend_TAU, packed_gmnnn_lmnnn_TAU, &
+                 packed_qctend_TAU_diag, packed_nctend_TAU_diag, packed_qrtend_TAU_diag, packed_nrtend_TAU_diag, packed_ML_fixer, packed_qc_fixer, packed_nc_fixer, packed_qr_fixer, packed_nr_fixer )
+!-- TAU
+                                                 
          end select
       end select
 
@@ -2184,6 +2319,16 @@ subroutine micro_mg_cam_tend_pack(state, ptend, dtime, pbuf, mgncol, mgcols, nle
 
       ! Sum all outputs for averaging.
       call post_proc%accumulate()
+!++ TAU
+      amk_c = amk_c + packed_amk_c/num_steps
+      ank_c = ank_c + packed_ank_c/num_steps
+      amk_r = amk_r + packed_amk_r/num_steps
+      ank_r = ank_r + packed_ank_r/num_steps
+      amk = amk + packed_amk/num_steps
+      ank = ank + packed_ank/num_steps
+      amk_out = amk_out + packed_amk_out/num_steps
+      ank_out = ank_out + packed_ank_out/num_steps
+!-- TAU
 
    end do
 
@@ -2887,6 +3032,42 @@ subroutine micro_mg_cam_tend_pack(state, ptend, dtime, pbuf, mgncol, mgcols, nle
    call outfld( 'MPDI2P', ftem_grid, pcols, lchnk)
 
    ! Output fields which have not been averaged already, averaging if use_subcol_microp is true
+!++ TAU
+   call outfld('scale_qc',    scale_qc,    psetcols, lchnk, avg_subcol_field=use_subcol_microp)
+   call outfld('scale_nc',    scale_nc,    psetcols, lchnk, avg_subcol_field=use_subcol_microp)
+   call outfld('scale_qr',    scale_qr,    psetcols, lchnk, avg_subcol_field=use_subcol_microp)
+   call outfld('scale_nr',    scale_nr,    psetcols, lchnk, avg_subcol_field=use_subcol_microp)
+   call outfld('amk_c',       amk_c,       psetcols, lchnk, avg_subcol_field=use_subcol_microp)
+   call outfld('ank_c',       ank_c,       psetcols, lchnk, avg_subcol_field=use_subcol_microp)
+   call outfld('amk_r',       amk_r,       psetcols, lchnk, avg_subcol_field=use_subcol_microp)
+   call outfld('ank_r',       ank_r,       psetcols, lchnk, avg_subcol_field=use_subcol_microp)
+   call outfld('amk',         amk,         psetcols, lchnk, avg_subcol_field=use_subcol_microp)
+   call outfld('ank',         ank,         psetcols, lchnk, avg_subcol_field=use_subcol_microp)
+   call outfld('amk_out',     amk_out,     psetcols, lchnk, avg_subcol_field=use_subcol_microp)
+   call outfld('ank_out',     ank_out,     psetcols, lchnk, avg_subcol_field=use_subcol_microp)
+   call outfld('QC_TAU_out',  qc_out,      psetcols, lchnk, avg_subcol_field=use_subcol_microp)
+   call outfld('NC_TAU_out',  nc_out,      psetcols, lchnk, avg_subcol_field=use_subcol_microp)
+   call outfld('QR_TAU_out',  qr_out,      psetcols, lchnk, avg_subcol_field=use_subcol_microp)
+   call outfld('NR_TAU_out',  nr_out,      psetcols, lchnk, avg_subcol_field=use_subcol_microp)
+   call outfld('qctend_MG2',  qctend_MG2,  psetcols, lchnk, avg_subcol_field=use_subcol_microp)
+   call outfld('nctend_MG2',  nctend_MG2,  psetcols, lchnk, avg_subcol_field=use_subcol_microp)
+   call outfld('qrtend_MG2',  qrtend_MG2,  psetcols, lchnk, avg_subcol_field=use_subcol_microp)
+   call outfld('nrtend_MG2',  nrtend_MG2,  psetcols, lchnk, avg_subcol_field=use_subcol_microp)
+   call outfld('qctend_TAU',  qctend_TAU,  psetcols, lchnk, avg_subcol_field=use_subcol_microp)
+   call outfld('nctend_TAU',  nctend_TAU,  psetcols, lchnk, avg_subcol_field=use_subcol_microp)
+   call outfld('qrtend_TAU',  qrtend_TAU,  psetcols, lchnk, avg_subcol_field=use_subcol_microp)
+   call outfld('nrtend_TAU',  nrtend_TAU,  psetcols, lchnk, avg_subcol_field=use_subcol_microp)
+   call outfld('qctend_TAU_diag',  qctend_TAU_diag,  psetcols, lchnk, avg_subcol_field=use_subcol_microp)
+   call outfld('nctend_TAU_diag',  nctend_TAU_diag,  psetcols, lchnk, avg_subcol_field=use_subcol_microp)
+   call outfld('qrtend_TAU_diag',  qrtend_TAU_diag,  psetcols, lchnk, avg_subcol_field=use_subcol_microp)
+   call outfld('nrtend_TAU_diag',  nrtend_TAU_diag,  psetcols, lchnk, avg_subcol_field=use_subcol_microp)
+   call outfld('gmnnn_lmnnn_TAU',  gmnnn_lmnnn_TAU,  psetcols, lchnk, avg_subcol_field=use_subcol_microp) 
+   call outfld('ML_fixer',     ML_fixer,     psetcols, lchnk, avg_subcol_field=use_subcol_microp)
+   call outfld('qc_fixer',     qc_fixer,     psetcols, lchnk, avg_subcol_field=use_subcol_microp)
+   call outfld('nc_fixer',     nc_fixer,     psetcols, lchnk, avg_subcol_field=use_subcol_microp)
+   call outfld('qr_fixer',     qr_fixer,     psetcols, lchnk, avg_subcol_field=use_subcol_microp)
+   call outfld('nr_fixer',     nr_fixer,     psetcols, lchnk, avg_subcol_field=use_subcol_microp)
+!-- TAU
    call outfld('MPICLWPI',    iclwpi,      psetcols, lchnk, avg_subcol_field=use_subcol_microp)
    call outfld('MPICIWPI',    iciwpi,      psetcols, lchnk, avg_subcol_field=use_subcol_microp)
    call outfld('REFL',        refl,        psetcols, lchnk, avg_subcol_field=use_subcol_microp)
@@ -2909,6 +3090,8 @@ subroutine micro_mg_cam_tend_pack(state, ptend, dtime, pbuf, mgncol, mgcols, nle
    call outfld('MPDQ',        qvlat,       psetcols, lchnk, avg_subcol_field=use_subcol_microp)
    call outfld('MPDLIQ',      qcten,       psetcols, lchnk, avg_subcol_field=use_subcol_microp)
    call outfld('MPDICE',      qiten,       psetcols, lchnk, avg_subcol_field=use_subcol_microp)
+   call outfld('MPDNC',       ncten,       psetcols, lchnk, avg_subcol_field=use_subcol_microp)
+   call outfld('MPDNI',       niten,       psetcols, lchnk, avg_subcol_field=use_subcol_microp)
    call outfld('EVAPSNOW',    evapsnow,    psetcols, lchnk, avg_subcol_field=use_subcol_microp)
    call outfld('QCSEVAP',     qcsevap,     psetcols, lchnk, avg_subcol_field=use_subcol_microp)
    call outfld('QISEVAP',     qisevap,     psetcols, lchnk, avg_subcol_field=use_subcol_microp)
@@ -2945,6 +3128,12 @@ subroutine micro_mg_cam_tend_pack(state, ptend, dtime, pbuf, mgncol, mgcols, nle
    end if
 
    ! Output fields which are already on the grid
+!++ TAU
+   call outfld('QC_TAU_in',  state%q(1,1,ixcldliq), pcols, lchnk)
+   call outfld('NC_TAU_in',  state%q(1,1,ixnumliq), pcols, lchnk)
+   call outfld('QR_TAU_in',  state%q(1,1,ixrain),   pcols, lchnk)
+   call outfld('NR_TAU_in',  state%q(1,1,ixnumrain),pcols, lchnk)
+!-- TAU
    call outfld('QRAIN',       qrout_grid,       pcols, lchnk)
    call outfld('QSNOW',       qsout_grid,       pcols, lchnk)
    call outfld('NRAIN',       nrout_grid,       pcols, lchnk)
