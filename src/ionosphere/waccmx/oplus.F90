@@ -60,25 +60,29 @@ module oplus
     real(r8) :: adiff_limiter
     real(r8) :: shapiro_const
     logical  :: enforce_floor
+    logical  :: ring_polar_filter = .false.
     logical, parameter :: debug = .false.
-
+    
   contains
 
 !-----------------------------------------------------------------------
-  subroutine oplus_init( adiff_limiter_in, shapiro_const_in, enforce_floor_in )
+  subroutine oplus_init( adiff_limiter_in, shapiro_const_in, enforce_floor_in, ring_polar_filter_in )
 
     use cam_history,  only : addfld, horiz_only
     use filter_module,only : filter_init
+    use edyn_geogrid ,only : nlon
 
     real(r8), intent(in) :: adiff_limiter_in
     real(r8), intent(in) :: shapiro_const_in
     logical , intent(in) :: enforce_floor_in
-
+    logical , intent(in) :: ring_polar_filter_in
+    
     shapiro_const = shapiro_const_in
     enforce_floor = enforce_floor_in
     adiff_limiter = adiff_limiter_in
+    ring_polar_filter = ring_polar_filter_in
     
-    call filter_init
+    call filter_init( ring_polar_filter )
 
     !
     ! Save fields from oplus module:
@@ -171,6 +175,7 @@ module oplus
 !
     use edyn_mpi,only:  mp_geo_halos,mp_pole_halos,setpoles
     use edyn_geogrid,only : glat, nlat, nlev
+    use trsolv_mod, only : trsolv
 !
 ! Transport O+ ion.
 ! March-May, 2015 B.Foster: Adapted from TIEGCM (oplus.F) for WACCM-X.
@@ -1178,7 +1183,12 @@ module oplus
 !
 !   call filter1_op(op_out(kbot:nlev,i0:i1,j0:j1),kbot,nlev,i0,i1,j0,j1)
 !
-    call filter2_op(op_out(kbot:nlev,i0:i1,j0:j1),kbot,nlev,i0,i1,j0,j1)
+   if (ring_polar_filter) then
+     call ringfilter_op(op_out(kbot:nlev,i0:i1,j0:j1),kbot,nlev,i0,i1,j0,j1)
+   else    
+     call filter2_op(op_out(kbot:nlev,i0:i1,j0:j1),kbot,nlev,i0,i1,j0,j1)
+   endif
+   
 !
 !----------------------- Begin fourth latitude scan ---------------------
 !
@@ -1492,87 +1502,6 @@ module oplus
     enddo ! i=lon0,lon1
   end subroutine bdzdvb
 !-----------------------------------------------------------------------
-  subroutine trsolv(a,b,c,f,x,lev0,lev1,k1,k2,lon0,lon1)
-!
-! Tri-diagonal solver.
-!   a(k,i)*x(k-1,i) + b(k,i)*x(k,i) + c(k,i)*x(k+1,i) = f(k,i)
-!
-    implicit none
-!
-! Args:
-    integer,intent(in) :: lev0,lev1,k1,k2,lon0,lon1
-    real(r8),dimension(lev0:lev1,lon0:lon1),intent(in) :: &
-      a, & ! input coefficients
-      b, & ! input coefficients
-      c, & ! input coefficients
-      f    ! input RHS
-    real(r8),dimension(lev0:lev1,lon0:lon1),intent(out) :: &
-      x  ! output
-!
-! Local:
-    integer :: k,kk,i
-    real(r8),dimension(lev0:lev1,lon0:lon1) :: w1,w2,w3  ! work arrays
-
-!
-! Lower boundary (W(K1)=B(K1):
-    do i=lon0,lon1
-      w1(lev0,i) = b(lev0,i) 
-    enddo
-!
-! Set up work arrays:
-    do i=lon0,lon1
-      do k=k1+1,k2
-!
-! W(KF+K-1)=C(K-1)/W(K-1):
-        w2(k-1,i) = c(k-1,i) / w1(k-1,i)
-!
-! W(K)=A(K)*W(KF+K-1)
-        w1(k,i) = a(k,i) * w2(k-1,i)
-!
-! W(K)=B(K)-W(K)
-        w1(k,i) = b(k,i) - w1(k,i)
-      enddo ! k=k1+1,k2
-    enddo ! i=lon0,lon1
-!
-! Lower boundary (W(2*KF+K1)=F(K1)/W(K1)):
-    do i=lon0,lon1
-      w3(k1,i) = f(k1,i) / w1(k1,i)
-    enddo
-!
-    do i=lon0,lon1
-      do k=k1+1,k2
-!
-! W(2*KF+K)=A(K)*W(2*KF+K-1)
-        w3(k,i) = a(k,i) * w3(k-1,i)
-!
-! W(2*KF+K)=F(K)-W(2*KF+K)
-        w3(k,i) = f(k,i) - w3(k,i)         
-!
-! W(2*KF+K)=W(2*KF+K)/W(K)
-        w3(k,i) = w3(k,i) / w1(k,i)
-      enddo ! k=k1+1,k2
-    enddo ! i=lon0,lon1
-!
-! Upper boundary (X(K2)=W(2*KF+K2)):
-    do i=lon0,lon1
-      x(k2,i) = w3(k2,i)       
-    enddo
-!
-
-! Back substitution:
-    do i=lon0,lon1
-      do kk=k1+1,k2          
-        k = k1+k2-kk ! k2-1,k1,-1
-!
-! X(K)=W(KF+K)*X(K+1)
-        x(k,i) = w2(k,i) * x(k+1,i)
-!
-! X(K)=W(2*KF+K)-X(K)
-        x(k,i) = w3(k,i) - x(k,i)
-      enddo ! k=k1+1,k2
-    enddo
-  end subroutine trsolv
-!-----------------------------------------------------------------------
   subroutine printpoles(f,klev,k0,k1,i0,i1,j0,j1,name)
     use edyn_geogrid,only : nlat
 !
@@ -1752,5 +1681,83 @@ module oplus
     enddo
     deallocate(fkij(1)%ptr)
   end subroutine filter2_op
+!-----------------------------------------------------------------------
+  subroutine ringfilter_op(f,k0,k1,i0,i1,j0,j1)
+    use filter_module,only: ringfilter
+    use edyn_mpi     ,only: mp_gatherlons_f3d,mytidi
+    use edyn_mpi     ,only: mp_scatterlons_f3d
+    use edyn_geogrid ,only: nlon
+!
+! Args:
+    integer,intent(in) :: k0,k1,i0,i1,j0,j1
+    real(r8),intent(inout) :: f(k0:k1,i0:i1,j0:j1)
+!
+! Local:
+    integer :: i,j,k,nlevs
+    real(r8) :: fik(nlon,k1-k0+1)
+    type(array_ptr_type) :: fkij(1) ! fkij(1)%ptr(k1-k0+1,nlon,j0:j1)
+
+    nlevs = k1-k0+1
+!
+! Define lons in fkij from current task subdomain:
+!
+    allocate(fkij(1)%ptr(nlevs,nlon,j0:j1))
+!$omp parallel do private( i,j,k )
+    do j=j0,j1
+      do i=i0,i1
+        do k=k0,k1
+          fkij(1)%ptr(k-k0+1,i,j) = f(k,i,j)
+        enddo
+      enddo
+    enddo
+!
+! Gather longitudes into tasks in first longitude column of task table
+!   (leftmost of each j-row) for global fft. (i.e., tasks with mytidi==0
+!   gather lons from other tasks in that row). This includes all latitudes.
+!
+    call mp_gatherlons_f3d(fkij,1,nlevs,i0,i1,j0,j1,1)
+!
+! Only leftmost tasks at each j-row of tasks does the global filtering:
+!
+    if (mytidi==0) then
+!
+! Define 2d array with all longitudes for filter at each latitude:
+!
+      do j=j0,j1
+        do i=1,nlon
+          do k=k0,k1
+            fik(i,k-k0+1) = fkij(1)%ptr(k-k0+1,i,j)
+          enddo
+        enddo 
+!
+! Remove wave numbers > kut(lat):
+!
+        call ringfilter(1,nlevs,j,fik)
+!
+! Return filtered array to fkij:
+!
+        do i=1,nlon
+          do k=k0,k1
+            fkij(1)%ptr(k-k0+1,i,j) = fik(i,k-k0+1)
+          enddo
+        enddo ! i=1,nlon
+      enddo ! j=j0,j1
+    endif ! mytidi==0
+!
+! Now leftmost task at each j-row must redistribute filtered data
+! back to other tasks in the j-row (mytidi>0,mytidj) (includes latitude):
+!
+    call mp_scatterlons_f3d(fkij,1,nlevs,i0,i1,j0,j1,1)
+!
+! Return filtered array to inout field at task subdomain:
+    do j=j0,j1
+      do i=i0,i1
+        do k=k0,k1
+          f(k,i,j) = fkij(1)%ptr(k-k0+1,i,j)
+        enddo
+      enddo
+    enddo
+    deallocate(fkij(1)%ptr)
+  end subroutine ringfilter_op
 !-----------------------------------------------------------------------
 end module oplus

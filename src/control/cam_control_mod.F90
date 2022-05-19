@@ -1,15 +1,12 @@
 module cam_control_mod
 !------------------------------------------------------------------------------------------------
-! 
+!
 ! High level control variables.  Information received from the driver/coupler is
 ! stored here.
-! 
+!
 !------------------------------------------------------------------------------------------------
 
 use shr_kind_mod,     only: r8=>shr_kind_r8, cs=>shr_kind_cs, cl=>shr_kind_cl
-use seq_infodata_mod, only: seq_infodata_start_type_start, seq_infodata_start_type_cont, &
-                            seq_infodata_start_type_brnch
-
 use spmd_utils,       only: masterproc
 use cam_logfile,      only: iulog
 use cam_abortutils,   only: endrun
@@ -34,10 +31,12 @@ logical, protected :: branch_run   ! branch from a previous run; requires a rest
 logical, protected :: adiabatic         ! true => no physics
 logical, protected :: ideal_phys        ! true => run Held-Suarez (1994) physics
 logical, protected :: kessler_phys      ! true => run Kessler physics
+logical, protected :: tj2016_phys       ! true => run tj2016 physics
+logical, protected :: simple_phys       ! true => adiabatic or ideal_phys or kessler_phys
+                                        !         or tj2016
 logical, protected :: aqua_planet       ! Flag to run model in "aqua planet" mode
 logical, protected :: moist_physics     ! true => moist physics enabled, i.e.,
                                         ! (.not. ideal_phys) .and. (.not. adiabatic)
-logical, protected :: dart_mode         ! Flag to run model with DART
 
 logical, protected :: brnch_retain_casename ! true => branch run may use same caseid as
                                             !         the run being branched from
@@ -54,13 +53,15 @@ contains
 !================================================================================================
 
 subroutine cam_ctrl_init( &
-   caseid_in, ctitle_in, start_type, dart_mode_in, &
+   caseid_in, ctitle_in, &
+   initial_run_in, restart_run_in, branch_run_in, &
    aqua_planet_in, brnch_retain_casename_in)
 
    character(len=cl), intent(in) :: caseid_in            ! case ID
    character(len=cl), intent(in) :: ctitle_in            ! case title
-   character(len=cs), intent(in) :: start_type           ! start type: initial, restart, or branch
-   logical,           intent(in) :: dart_mode_in         ! Flag to run model with DART
+   logical,           intent(in) :: initial_run_in       ! true => inital run
+   logical,           intent(in) :: restart_run_in       ! true => restart run
+   logical,           intent(in) :: branch_run_in        ! true => branch run
    logical,           intent(in) :: aqua_planet_in       ! Flag to run model in "aqua planet" mode
    logical,           intent(in) :: brnch_retain_casename_in ! Flag to allow a branch to use the same
                                                              ! caseid as the run being branched from.
@@ -73,26 +74,10 @@ subroutine cam_ctrl_init( &
 
    caseid = caseid_in
    ctitle = ctitle_in
-   dart_mode = dart_mode_in
 
-   initial_run = .false.
-   restart_run = .false.
-   branch_run  = .false.
-   if (dart_mode) then
-      initial_run = .true.
-   else
-      select case (trim(start_type))
-      case (seq_infodata_start_type_start)
-         initial_run = .true.
-      case (seq_infodata_start_type_cont)
-         restart_run = .true.
-      case (seq_infodata_start_type_brnch)
-         branch_run = .true.
-      case default
-         write(errmsg,*) sub // ': FATAL: unknown start type: ', trim(start_type)
-         call endrun(errmsg)
-      end select
-   end if
+   initial_run = initial_run_in
+   restart_run = restart_run_in
+   branch_run  = branch_run_in
 
    aqua_planet = aqua_planet_in
 
@@ -108,11 +93,7 @@ subroutine cam_ctrl_init( &
       else if (branch_run) then
          write(iulog,*) '  Branch of an earlier run'
       else
-         if (dart_mode) then
-            write(iulog,*) '  DART run using CAM initial mode'
-         else
-            write(iulog,*) '         Initial run'
-         end if
+         write(iulog,*) '         Initial run'
       end if
       write(iulog,*) ' ********** CASE = ',trim(caseid),' **********'
       write(iulog,'(1x,a)') ctitle
@@ -140,6 +121,8 @@ subroutine cam_ctrl_set_orbit(eccen_in, obliqr_in, lambm0_in, mvelpp_in)
 
 end subroutine cam_ctrl_set_orbit
 
+!--------------------------------------------------------------------------------------------------
+
 subroutine cam_ctrl_set_physics_type(phys_package)
   ! Dummy argument
   character(len=*), intent(in) :: phys_package
@@ -149,10 +132,11 @@ subroutine cam_ctrl_set_physics_type(phys_package)
   adiabatic = trim(phys_package) == 'adiabatic'
   ideal_phys = trim(phys_package) == 'held_suarez'
   kessler_phys = trim(phys_package) == 'kessler'
+  tj2016_phys = trim(phys_package) == 'tj2016'
+
+  simple_phys = adiabatic .or. ideal_phys .or. kessler_phys .or. tj2016_phys
+
   moist_physics = .not. (adiabatic .or. ideal_phys)
-  if (adiabatic .and. ideal_phys) then
-    call endrun (subname//': FATAL: Only one of ADIABATIC or HELD_SUAREZ can be .true.')
-  end if
 
   if ((.not. moist_physics) .and. aqua_planet) then
     call endrun (subname//': FATAL: AQUA_PLANET not compatible with dry physics package, ('//trim(phys_package)//')')
@@ -161,12 +145,13 @@ subroutine cam_ctrl_set_physics_type(phys_package)
   if (masterproc) then
     if (adiabatic) then
       write(iulog,*) 'Run model ADIABATICALLY (i.e. no physics)'
-    end if
-    if (ideal_phys) then
+      write(iulog,*) '  Global energy fixer is on for non-Eulerian dycores.'
+    else if (ideal_phys) then
       write(iulog,*) 'Run model with Held-Suarez physics forcing'
-    end if
-    if (kessler_phys) then
-      write(iulog,*) 'Run model with Kessler physics forcing'
+    else if (kessler_phys) then
+      write(iulog,*) 'Run model with Kessler warm-rain physics forcing'
+    else if (tj2016_phys) then
+      write(iulog,*) 'Run model with Thatcher-Jablonowski (2016) physics forcing (moist Held-Suarez)'
     end if
   end if
 

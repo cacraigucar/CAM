@@ -11,6 +11,11 @@ module test_fvm_mapping
 
   real(r8), parameter, private :: deg2rad = pi/180.0_r8
   real(r8), parameter, private :: psurf_moist = 100000.0_r8 !moist surface pressure
+  integer,  parameter, private :: cl_idx  = 12
+  integer,  parameter, private :: cl2_idx = 13
+  real(r8), parameter, private :: cly_constant = 4.e-6_r8
+  integer,  parameter, private :: num_fnc = 26
+  integer,  parameter, private :: offset = 15
 
   public :: test_mapping_overwrite_tendencies, test_mapping_addfld
   public :: test_mapping_output_mapped_tendencies, test_mapping_overwrite_dyn_state
@@ -26,31 +31,31 @@ contains
 
     name = 'd2p_u_gll'
     call addfld(trim(name),   (/ 'lev' /),  'I','m/2','Exact zonal wind on GLL grid',gridname='GLL')
-    call add_default (trim(name), 1, ' ')
+    !call add_default (trim(name), 1, ' ')
 
     name = 'd2p_v_gll'
     call addfld(trim(name),   (/ 'lev' /),  'I','m/2','Exact meridional wind on GLL grid',gridname='GLL')
-    call add_default (trim(name), 1, ' ')
+    !call add_default (trim(name), 1, ' ')
 
     name = 'd2p_scalar_gll'
     call addfld(trim(name),   (/ 'lev' /),  'I','','Exact scalar on GLL grid',gridname='GLL')
-    call add_default (trim(name), 1, ' ')
+    !call add_default (trim(name), 1, ' ')
 
     name = 'd2p_u'
     call addfld(trim(name),   (/ 'lev' /),  'I','m/2','Zonal wind mapped to physics grid')
-    call add_default (trim(name), 1, ' ')
+    !call add_default (trim(name), 1, ' ')
 
     name = 'd2p_u_err'
     call addfld(trim(name),   (/ 'lev' /),  'I','m/2','Error in zonal wind mapped to physics grid')
-    call add_default (trim(name), 1, ' ')
+    !call add_default (trim(name), 1, ' ')
 
     name = 'd2p_v_err'
     call addfld(trim(name),   (/ 'lev' /),  'I','m/2','Error in meridional wind mapped to physics grid')
-    call add_default (trim(name), 1, ' ')
+    !call add_default (trim(name), 1, ' ')
 
     name = 'd2p_v'
     call addfld(trim(name),   (/ 'lev' /),  'I','m/s','Meridional wind mapped to physics grid')
-    call add_default (trim(name), 1, ' ')
+    !call add_default (trim(name), 1, ' ')
 
     name = 'd2p_scalar'
     call addfld(trim(name),   (/ 'lev' /),  'I','','Scalar mapped to physics grid')
@@ -60,8 +65,8 @@ contains
     call addfld(trim(name),   (/ 'lev' /),  'I','','Error in scalar mapped to physics grid')
     call add_default (trim(name), 1, ' ')
 
-    do nq=2,qsize_condensate_loading
-      m_cnst = qsize_condensate_loading_idx(nq)
+    do nq=ntrac,ntrac!xxx 2,qsize_condensate_loading
+      m_cnst = nq!xxx qsize_condensate_loading_idx(nq)
       name = 'f2p_'//trim(cnst_name(m_cnst))//'_fvm'
       call addfld(trim(name),   (/ 'lev' /),  'I','','Exact water tracer on fvm grid',gridname='FVM')
       call add_default (trim(name), 1, ' ')
@@ -76,13 +81,13 @@ contains
       !
       name = 'p2d_'//trim(cnst_name(m_cnst))//''
       call addfld(trim(name),   (/ 'lev' /),  'I','','Water tracer on physics grid')
-      call add_default (trim(name), 1, ' ')
+      !call add_default (trim(name), 1, ' ')
       name = 'p2d_'//trim(cnst_name(m_cnst))//'_gll'
       call addfld(trim(name),   (/ 'lev' /),  'I','','Water tracer on GLL grid',gridname='GLL')
-      call add_default (trim(name), 1, ' ')
+      !call add_default (trim(name), 1, ' ')
       name = 'p2d_'//trim(cnst_name(m_cnst))//'_err_gll'
       call addfld(trim(name),   (/ 'lev' /),  'I','','Error in water tracer mapped to GLL grid',gridname='GLL')
-      call add_default (trim(name), 1, ' ')
+      !call add_default (trim(name), 1, ' ')
       !
       ! physgrid to fvm (condensate loading tracers)
       !
@@ -96,69 +101,93 @@ contains
       call addfld(trim(name),   (/ 'lev' /),  'I','','Error in water tracer mapped to FVM grid',gridname='FVM')
       call add_default (trim(name), 1, ' ')
     end do
+    !
+    ! temperature tendency
+    !
+    name = 'p2d_ptend'
+    call addfld(trim(name),   (/ 'lev' /),  'I','','T tendency on physics grid')
+    !call add_default (trim(name), 1, ' ')
+    name = 'p2d_ptend_gll'
+    call addfld(trim(name),   (/ 'lev' /),  'I','','T tendency on GLL grid',gridname='GLL')
+    !call add_default (trim(name), 1, ' ')
+    name = 'p2d_ptend_err_gll'
+    call addfld(trim(name),   (/ 'lev' /),  'I','','Error in T tendency mapped to GLL grid',gridname='GLL')
+    !call add_default (trim(name), 1, ' ')
+
     call addfld('p2d_u',   (/ 'lev' /),  'I','m/2','Zonal wind on physics grid')
-    call add_default ('p2d_u', 1, ' ')
+    !call add_default ('p2d_u', 1, ' ')
     call addfld('p2d_v',   (/ 'lev' /),  'I','m/2','Meridional wind on physics grid')
-    call add_default ('p2d_v', 1, ' ')
+    !call add_default ('p2d_v', 1, ' ')
     call addfld('p2d_u_gll',   (/ 'lev' /),  'I','m/2','Zonal wind on physics grid',gridname='GLL')
-    call add_default ('p2d_u_gll', 1, ' ')
+    !call add_default ('p2d_u_gll', 1, ' ')
     call addfld('p2d_v_gll',   (/ 'lev' /),  'I','m/2','Meridional wind on physics grid',gridname='GLL')
-    call add_default ('p2d_v_gll', 1, ' ')
+    !call add_default ('p2d_v_gll', 1, ' ')
     call addfld('p2d_u_gll_err',   (/ 'lev' /),  'I','m/2','Error in zonal wind interpolation to GLL grid',gridname='GLL')
-    call add_default ('p2d_u_gll_err', 1, ' ')
+    !call add_default ('p2d_u_gll_err', 1, ' ')
     call addfld('p2d_v_gll_err',   (/ 'lev' /),  'I','m/2','Error in meridional wind interpolation to GLL grid',&
          gridname='GLL')
-    call add_default ('p2d_v_gll_err', 1, ' ')
+    !call add_default ('p2d_v_gll_err', 1, ' ')
 
 !      name = 'phys2dyn_'//trim(cnst_name(m_cnst))//'_physgrid'
 !      call outfld(trim(name),phys_state%q(:ncols,:,m_cnst),ncols,lchnk)
 #endif
   end subroutine test_mapping_addfld
 
-  subroutine test_mapping_overwrite_tendencies(phys_state,phys_tend,ncols,lchnk,q_prev)
+  subroutine test_mapping_overwrite_tendencies(phys_state,phys_tend,ncols,lchnk,q_prev,fvm)
     use dimensions_mod,         only: fv_nphys
     use constituents,           only: cnst_get_ind,pcnst,cnst_name
     use physics_types,  only: physics_state, physics_tend
     type(physics_state), intent(inout) :: phys_state
     type(physics_tend),  intent(inout) :: phys_tend
     real(r8), dimension(:,:,:), intent(inout) :: q_prev
-!    type(fvm_struct), intent(inout):: fvm(:)
+    type(fvm_struct), intent(inout):: fvm(:)
     integer,          intent(in)   :: ncols,lchnk
 #ifdef debug_coupling
     integer :: icol,k
     character(LEN=128) :: name
-    integer :: m_cnst, nq
+    integer :: m_cnst, nq, ie
 
-    q_prev = 0.0_r8
+    q_prev(:,:,ntrac) = 0.0_r8
+    do ie=1,nelemd
+!xxx      fvm(ie)%c(:,:,:,ntrac) = 0.0_r8
+    end do
+    
     phys_state%pdel(1:ncols,:) = phys_state%pdeldry(1:ncols,:) !make sure there is no conversion from wet to dry
-    do nq=2,qsize_condensate_loading
-      m_cnst = qsize_condensate_loading_idx(nq)
+    do nq=ntrac,ntrac!xxx 2,qsize_condensate_loading
+      m_cnst = nq!xxx qsize_condensate_loading_idx(nq)
       do icol=1,ncols
-        do k=1,8
-          phys_state%q(icol,k,m_cnst) = test_func(phys_state%lat(icol), phys_state%lon(icol), k, k)
+        do k=1,num_fnc
+          phys_state%q(icol,k,m_cnst)   = test_func(phys_state%lat(icol), phys_state%lon(icol), k, k)
         end do
       enddo
       name = 'p2f_'//trim(cnst_name(m_cnst))//''
       call outfld(trim(name),phys_state%q(:ncols,:,m_cnst),ncols,lchnk)
+      name = 'p2d_'//trim(cnst_name(m_cnst))//''
+      call outfld(trim(name),phys_state%q(:ncols,:,m_cnst),ncols,lchnk)
     end do
 
     do icol=1,ncols
-      do k=1,nlev
-        phys_tend%dudt(icol,k) = test_func(phys_state%lat(icol), phys_state%lon(icol), k, 9)
-        phys_tend%dvdt(icol,k) = test_func(phys_state%lat(icol), phys_state%lon(icol), k,10)
+      do k=ntrac,ntrac
+        phys_tend%dudt(icol,k) = test_func(phys_state%lat(icol), phys_state%lon(icol), k, k)
+        phys_tend%dvdt(icol,k) = test_func(phys_state%lat(icol), phys_state%lon(icol), k, k)
+        phys_tend%dtdt(icol,k) = test_func(phys_state%lat(icol), phys_state%lon(icol), k, k)
       end do
     enddo
     name = 'p2d_u'
     call outfld(trim(name),phys_tend%dudt(:ncols,:),ncols,lchnk)
     name = 'p2d_v'
     call outfld(trim(name),phys_tend%dvdt(:ncols,:),ncols,lchnk)
+    name = 'p2d_ptend'
+    call outfld(trim(name),phys_tend%dtdt(:ncols,:),ncols,lchnk)
 
-!    do icol=1,ncols
-!      do k=1,nlev
+
+    do icol=1,ncols
+      do k=1,nlev
 !        phys_tend%dudt(icol,k) = 0.0_r8
 !        phys_tend%dvdt(icol,k) = 0.0_r8
-!      end do
-!    enddo
+!        phys_tend%dtdt(icol,k) = 0.0_r8
+      end do
+    enddo
 #endif
   end subroutine test_mapping_overwrite_tendencies
 
@@ -172,61 +201,72 @@ contains
     integer :: ie,i,j,k
     character(LEN=128) :: name
     integer :: nq,m_cnst
-    real(r8) :: diff(nc,nc,nlev)
-
+    real(r8) :: diff(nc,nc,nlev,ntrac)
+    diff = 0.0_r8
     do ie = nets,nete
-      call outfld('p2d_u_gll', RESHAPE(elem(ie)%derived%fm(:,:,1,:,1),(/npsq,nlev/)), npsq, ie)
-      call outfld('p2d_v_gll', RESHAPE(elem(ie)%derived%fm(:,:,2,:,1),(/npsq,nlev/)), npsq, ie)
-      do k=1,nlev
+      call outfld('p2d_u_gll', RESHAPE(elem(ie)%derived%fm(:,:,1,:),(/npsq,nlev/)), npsq, ie)
+      call outfld('p2d_v_gll', RESHAPE(elem(ie)%derived%fm(:,:,2,:),(/npsq,nlev/)), npsq, ie)
+      call outfld('p2d_ptend_gll', RESHAPE(elem(ie)%derived%ft(:,:,:),(/npsq,nlev/)), npsq, ie)
+      do k=ntrac,ntrac
         do j=1,np
           do i=1,np
-            elem(ie)%derived%fm(i,j,1,k,1)   = elem(ie)%derived%fm(i,j,1,k,1) -&
-                 test_func(elem(ie)%spherep(i,j)%lat, elem(ie)%spherep(i,j)%lon, k, 9)
-            elem(ie)%derived%fm(i,j,2,k,1)   = elem(ie)%derived%fm(i,j,2,k,1) - &
-                 test_func(elem(ie)%spherep(i,j)%lat, elem(ie)%spherep(i,j)%lon, k,10)
+            elem(ie)%derived%fm(i,j,1,k)   = elem(ie)%derived%fm(i,j,1,k) -&
+                 test_func(elem(ie)%spherep(i,j)%lat, elem(ie)%spherep(i,j)%lon, k,k)
+            elem(ie)%derived%fm(i,j,2,k)   = elem(ie)%derived%fm(i,j,2,k) - &
+                 test_func(elem(ie)%spherep(i,j)%lat, elem(ie)%spherep(i,j)%lon, k,k)
+            elem(ie)%derived%ft(i,j,k)   = elem(ie)%derived%ft(i,j,k) - &
+                 test_func(elem(ie)%spherep(i,j)%lat, elem(ie)%spherep(i,j)%lon, k,k)
           end do
         end do
       end do
-      call outfld('p2d_u_gll_err', RESHAPE(elem(ie)%derived%fm(:,:,1,:,1),(/npsq,nlev/)), npsq, ie)
-      call outfld('p2d_v_gll_err', RESHAPE(elem(ie)%derived%fm(:,:,2,:,1),(/npsq,nlev/)), npsq, ie)
+      call outfld('p2d_u_gll_err'    , RESHAPE(elem(ie)%derived%fm(:,:,1,:),(/npsq,nlev/)), npsq, ie)
+      call outfld('p2d_v_gll_err'    , RESHAPE(elem(ie)%derived%fm(:,:,2,:),(/npsq,nlev/)), npsq, ie)
+      call outfld('p2d_ptend_err_gll', RESHAPE(elem(ie)%derived%ft(:,:,:),(/npsq,nlev/)), npsq, ie)
+      elem(ie)%derived%ft(:,:,:)   = 0.0_r8
     end do
 
     do ie = nets,nete
-      do nq=2,qsize_condensate_loading
-        m_cnst = qsize_condensate_loading_idx(nq)
+      do nq=ntrac,ntrac!xxx 2,qsize_condensate_loading
+        m_cnst = nq!xxx qsize_condensate_loading_idx(nq)
         name = 'p2d_'//trim(cnst_name(m_cnst))//'_gll'
-        call outfld(TRIM(name), RESHAPE(elem(ie)%derived%fq(:,:,:,nq,1),(/npsq,nlev/)), npsq, ie)
+        call outfld(TRIM(name), RESHAPE(elem(ie)%derived%fq(:,:,:,nq),(/npsq,nlev/)), npsq, ie)
         !        call outfld(trim(name),&
         !             RESHAPE(fvm(ie)%fc(1:nc,1:nc,:,m_cnst),&
         !             (/nc*nc,nlev/)),nc*nc,ie)
-        do k=1,8
+        do k=1,num_fnc
           do j=1,np
             do i=1,np
-              elem(ie)%derived%fq(i,j,k,nq,1) = elem(ie)%derived%fq(i,j,k,nq,1)-&
+              elem(ie)%derived%fq(i,j,k,nq) = elem(ie)%derived%fq(i,j,k,nq)-&
                    test_func(elem(ie)%spherep(i,j)%lat, elem(ie)%spherep(i,j)%lon, k, k)
             end do
           end do
         end do
         name = 'p2d_'//trim(cnst_name(m_cnst))//'_err_gll'
-        call outfld(TRIM(name), RESHAPE(elem(ie)%derived%fq(:,:,:,nq,1),(/npsq,nlev/)), npsq, ie)
+        call outfld(TRIM(name), RESHAPE(elem(ie)%derived%fq(:,:,:,nq),(/npsq,nlev/)), npsq, ie)
       end do
       if (ntrac>0) then
-        do nq=2,qsize_condensate_loading
-          m_cnst = qsize_condensate_loading_idx(nq)
+        do nq=ntrac,ntrac!xxx 2,qsize_condensate_loading
+          m_cnst = nq!xxx qsize_condensate_loading_idx(nq)
           name = 'p2f_'//trim(cnst_name(m_cnst))//'_fvm'
+          !
+          ! cly
+          !
+!          k=num_tracer+1
+!          fvm(ie)%fc(1:nc,1:nc,k,:) = fvm(ie)%fc(1:nc,1:nc,cl_idx,:)+&
+!                                    2.0_r8*fvm(ie)%fc(1:nc,1:nc,cl2_idx,:)
           call outfld(trim(name),&
-               RESHAPE(fvm(ie)%fc(1:nc,1:nc,:,m_cnst),&
+               RESHAPE(fvm(ie)%fc(1:nc,1:nc,:,m_cnst)/fvm(ie)%dp_fvm(1:nc,1:nc,:),&
                (/nc*nc,nlev/)),nc*nc,ie)
-          do k=1,8
+          do k=1,num_fnc
             do j=1,nc
               do i=1,nc
-                fvm(ie)%fc(i,j,k,m_cnst) = fvm(ie)%fc(i,j,k,m_cnst)-&
+                diff(i,j,k,m_cnst) = fvm(ie)%fc(i,j,k,m_cnst)/fvm(ie)%dp_fvm(i,j,k)-&
                      test_func(fvm(ie)%center_cart(i,j)%lat,fvm(ie)%center_cart(i,j)%lon, k, k)
               end do
             end do
           end do
           name = 'p2f_'//trim(cnst_name(m_cnst))//'_err_fvm'
-          call outfld(TRIM(name), RESHAPE(fvm(ie)%fc(:,:,:,m_cnst),(/nc*nc,nlev/)), nc*nc, ie)
+          call outfld(TRIM(name), RESHAPE(diff(:,:,:,m_cnst),(/nc*nc,nlev/)), nc*nc, ie)
 
         end do
       endif
@@ -234,42 +274,59 @@ contains
 #endif
   end subroutine test_mapping_output_mapped_tendencies
 
-
-  subroutine test_mapping_overwrite_dyn_state(elem,fvm,tl_f)
+  subroutine test_mapping_overwrite_dyn_state(elem,fvm)
     use fvm_control_volume_mod, only: fvm_struct
     use constituents,           only: cnst_name
-    use dimensions_mod,         only: nc
+    use dimensions_mod,         only: nc,nhc
+    use hybrid_mod,             only: get_loop_ranges, hybrid_t,config_thread_region
+    use control_mod,            only: north, south, east, west, neast, nwest, seast, swest    
+    !    use fvm_mod,                only: fill_halo_fvm_noprealloc
+    use fvm_mod,                only: fill_halo_fvm,ghostBufQnhc_h    
+    use parallel_mod,           only: par
     type (fvm_struct), intent(inout)    :: fvm(:)
-    integer, intent(in) :: tl_f
     type(element_t), intent(inout) :: elem(:)             ! pointer to dyn_out element array
 #ifdef debug_coupling
-    integer :: i,j,k,ie,nq,m_cnst
+    integer            :: i,j,k,ie,nq,m_cnst
     character(LEN=128) :: name
-    do ie=1,nelemd
-      do nq=2,qsize_condensate_loading
-        m_cnst = qsize_condensate_loading_idx(nq)
+    integer            :: nets,nete
+    type(hybrid_t)                                                   :: hybrid
+
+    hybrid = config_thread_region(par,'serial')
+    call get_loop_ranges(hybrid,ibeg=nets,iend=nete)
+    do ie=nets,nete
+      do nq=ntrac,ntrac!xxx 2,qsize_condensate_loading        
+        m_cnst = nq!xxx qsize_condensate_loading_idx(nq)
         name = 'f2p_'//trim(cnst_name(m_cnst))//'_fvm'
-        do k=1,8
+        do k=1,num_fnc
           do j=1,nc
             do i=1,nc
-              fvm(ie)%c(i,j,k,m_cnst,:) = test_func(fvm(ie)%center_cart(i,j)%lat,fvm(ie)%center_cart(i,j)%lon, k, k)
+              fvm(ie)%c(i,j,k,m_cnst) = test_func(fvm(ie)%center_cart(i,j)%lat,fvm(ie)%center_cart(i,j)%lon, k, k)
             end do
           end do
         end do
-        call outfld(TRIM(name), RESHAPE(fvm(ie)%c(:,:,:,m_cnst,1),(/nc*nc,nlev/)), nc*nc, ie)
+        !
+        ! cly
+        !
+!        k=num_tracer+1
+!        do j=1,nc
+!          do i=1,nc
+!            fvm(ie)%c(i,j,k,m_cnst) = test_func(fvm(ie)%center_cart(i,j)%lat,fvm(ie)%center_cart(i,j)%lon, k,cl_idx)+&
+!                                 2.0_r8*test_func(fvm(ie)%center_cart(i,j)%lat,fvm(ie)%center_cart(i,j)%lon, k,cl2_idx)
+!          end do
+!        end do
+        call outfld(TRIM(name), RESHAPE(fvm(ie)%c(1:nc,1:nc,:,m_cnst),(/nc*nc,nlev/)), nc*nc, ie)
       end do
-
-
+      
       elem(ie)%state%Qdp(:,:,:,:,:)   = 0.0_r8 !for testing the p2d map
-      do k=1,nlev
+      do k=1,num_fnc
         do j=1,np
           do i=1,np
-            elem(ie)%state%v(i,j,1,k,:)   = test_func(elem(ie)%spherep(i,j)%lat, elem(ie)%spherep(i,j)%lon, k, 9 )
-            elem(ie)%state%v(i,j,2,k,:)   = test_func(elem(ie)%spherep(i,j)%lat, elem(ie)%spherep(i,j)%lon, k, 10)
+            elem(ie)%state%v(i,j,1,k,:)   = test_func(elem(ie)%spherep(i,j)%lat, elem(ie)%spherep(i,j)%lon, k, k )
+            elem(ie)%state%v(i,j,2,k,:)   = test_func(elem(ie)%spherep(i,j)%lat, elem(ie)%spherep(i,j)%lon, k, k)
           end do
         end do
       end do
-      do k=1,8
+      do k=1,num_fnc
         do j=1,np
           do i=1,np
             elem(ie)%derived%omega(i,j,k) = test_func(elem(ie)%spherep(i,j)%lat, elem(ie)%spherep(i,j)%lon, k, k)
@@ -280,6 +337,27 @@ contains
       call outfld('d2p_u_gll', RESHAPE(elem(ie)%state%v(:,:,1,:,1),(/npsq,nlev/)), npsq, ie)
       call outfld('d2p_v_gll', RESHAPE(elem(ie)%state%v(:,:,2,:,1),(/npsq,nlev/)), npsq, ie)
     end do
+    !
+    ! do boundary exchange (this call should be indentical to call in prim_driver)
+    !
+    call fill_halo_fvm(ghostBufQnhc_h,elem,fvm,hybrid,nets,nete,nhc,1,nlev,nlev)
+    do ie=nets,nete
+      if (fvm(ie)%cubeboundary>4) then
+        do k=ntrac,ntrac
+          select case(fvm(ie)%cubeboundary)
+          case (nwest)
+            fvm(ie)%c(0,nc+1,:,k) = fvm(ie)%c(1,nc+1,:,k)
+          case (swest)
+            fvm(ie)%c(0,0,:,k) = fvm(ie)%c(0,1,:,k)
+          case (seast)
+            fvm(ie)%c(nc+1,0,:,k) = fvm(ie)%c(0,nc,:,k)            
+          case (neast)
+            fvm(ie)%c(nc+1,nc+1,:,k) = fvm(ie)%c(nc,nc+1,:,k)                        
+          end select
+        end do
+      end if
+    end do
+!    call fill_halo_fvm_noprealloc(elem,fvm,hybrid,nets,nete,nhc,1,nlev)!xxx nhr chould be a function of interp_method
 #endif
   end subroutine test_mapping_overwrite_dyn_state
 
@@ -294,7 +372,7 @@ contains
     character(LEN=128) :: name
 
     do ie=1,nelemd
-      fvm(ie)%c(:,:,:,:,:) = 0.0_r8
+!xxx      fvm(ie)%c(:,:,:,ntrac) = 0.0_r8
     end do
 
     do lchnk = begchunk, endchunk
@@ -302,18 +380,25 @@ contains
       call outfld('d2p_u', phys_state(lchnk)%U(1:pcols,1:pver), pcols, lchnk)
       call outfld('d2p_v', phys_state(lchnk)%V(1:pcols,1:pver), pcols, lchnk)
       if (ntrac>0) then
-        do nq=2,qsize_condensate_loading
-          m_cnst = qsize_condensate_loading_idx(nq)
+        do nq=ntrac,ntrac!xxx 2,qsize_condensate_loading
+          m_cnst = nq!xxx qsize_condensate_loading_idx(nq)
           name = 'f2p_'//trim(cnst_name(m_cnst))
+          !
+          ! cly
+          !
+          !phys_state(lchnk)%q(1:pcols,num_tracer+1,m_cnst)=phys_state(lchnk)%q(1:pcols,cl_idx,m_cnst)+&
+          !      2.0_r8*phys_state(lchnk)%q(1:pcols,12,m_cnst)
           call outfld(TRIM(name), phys_state(lchnk)%q(1:pcols,1:pver,m_cnst), pcols, lchnk)
-          phys_state(lchnk)%q(1:pcols,1:pver,m_cnst) = 0.0_r8
-
-          do k=1,8
+!          k=num_tracer+1
+!          do icol=1,phys_state(lchnk)%ncol
+!            phys_state(lchnk)%q(icol,k,m_cnst) = phys_state(lchnk)%q(icol,cl_idx,m_cnst)+&
+!                                          2.0_r8*phys_state(lchnk)%q(icol,cl2_idx,m_cnst)-&
+!                                                 cly_constant
+!          end do
+          do k=1,num_fnc
             do icol=1,phys_state(lchnk)%ncol
               phys_state(lchnk)%q(icol,k,m_cnst) = phys_state(lchnk)%q(icol,k,m_cnst)&
-                   -test_func(phys_state(lchnk)%lat(icol), phys_state(lchnk)%lon(icol), k, 9)
-              phys_state(lchnk)%q(icol,k,m_cnst) = phys_state(lchnk)%q(icol,k,m_cnst)&
-                   -test_func(phys_state(lchnk)%lat(icol), phys_state(lchnk)%lon(icol), k,10)
+                   -test_func(phys_state(lchnk)%lat(icol), phys_state(lchnk)%lon(icol), k,k)
             end do
           enddo
           name = 'f2p_'//trim(cnst_name(m_cnst))//'_err'
@@ -337,7 +422,7 @@ contains
       call outfld(trim(name),phys_state(lchnk)%U(:pcols,:),pcols,lchnk)
       name = 'd2p_v_err'
       call outfld(trim(name),phys_state(lchnk)%V(:pcols,:),pcols,lchnk)
-      do k=1,8
+      do k=1,num_fnc
         do icol=1,phys_state(lchnk)%ncol
           phys_state(lchnk)%omega(icol,k) = phys_state(lchnk)%omega(icol,k)&
                -test_func(phys_state(lchnk)%lat(icol), phys_state(lchnk)%lon(icol), k,k)
@@ -380,22 +465,27 @@ contains
     real(r8)             :: cos_tmp, sin_tmp, eta
     real(r8)             :: u_wind, v_wind, lat, lon, u_tmp, v_tmp
     real(r8)             :: rotation_angle
-
+    real(r8)             :: det,r,k1,k2
+    real(r8), parameter :: pi = 3.1415926535897932384626433832795028841971693993751058209749445923078164_r8
+    real(r8), parameter :: half_pi = pi*0.5_r8
+    real(r8), parameter :: degrees_to_radians = pi/180.0_r8
+    real(r8), parameter :: k1_lat_center =   20.d0*degrees_to_radians
+    real(r8), parameter :: k1_lon_center =  300.d0*degrees_to_radians
 
     lon = lon_in
     lat = lat_in
 
 
-    select case(funcnum)
+    select case(MOD(funcnum,8)+1)
     case(1)
       !
       !   Non-smooth scalar field (slotted cylinder)
       !
       R0 = 0.5_r8
-      lon1 = 4.0_r8 * PI / 5.0_r8
+      lon1 = 5.0_r8 * PI / 6.0_r8
       lat1 = 0.0_r8
       Rg1 = acos(sin(lat1)*sin(lat)+cos(lat1)*cos(lat)*cos(lon-lon1))
-      lon2 = 6.0_r8 * PI / 5.0_r8
+      lon2 = 7.0_r8 * PI / 6.0_r8
       lat2 = 0.0_r8
       Rg2 = acos(sin(lat2)*sin(lat)+cos(lat2)*cos(lat)*cos(lon-lon2))
 
@@ -434,12 +524,14 @@ contains
       !
       fout = 0.5_r8 * ( tanh( 3.0_r8*abs(lat)-pi ) + 1.0_r8)
     case(4)
-      fout = 1.0e-8_r8
+      fout = 2.0_r8+cos(5.0_r8+40*lon)!1.0e-8_r8
+      fout = -0.5_r8-0.5_r8*(cos(16*lon)*(sin(2_r8*lat)**16))            
     case(5)
       !
       ! approximately Y^2_2 spherical harmonic
       !
-      fout = 0.5_r8 + 0.5_r8*(cos(lat)*cos(lat)*cos(2.0_r8*lon))
+      fout = sin(lon)*cos(40*lat)!1.0e-8_r8
+      fout = 0.5_r8*(cos(16*lon)*(sin(2_r8*lat)**16))      
     case(6)
       !
       ! approximately Y32_16 spherical harmonic
@@ -461,8 +553,35 @@ contains
       call Rossby_Haurwitz (lon, lat,u_wind, v_wind)
       CALL turnwi(u_wind,v_wind,u_tmp,v_tmp,lon_in,lat_in,lon,lat,0.0_r8,-0.5_r8*pi+rotation_angle,-1)
       fout = v_tmp
+    case(11)
+      fout = 1.0E-8_r8
+    case(12)
+      !
+      ! Terminator chemistry initial condition
+      !
+      k1 = 1.0_r8*max(0.d0,sin(lat)*sin(k1_lat_center) + cos(lat)*cos(k1_lat_center)*cos(lon-k1_lon_center))
+      k2 = 1._r8
+
+      r = k1 / (4._r8*k2)
+      det = sqrt(r*r + 2._r8*cly_constant*r)
+
+      fout  = (det-r)
+!      fout = cly_constant/2._r8 - (det-r)/2._r8
+    case(13)
+      !
+      ! Terminator chemistry initial condition
+      !
+      k1 = 1.0_r8*max(0.d0,sin(lat)*sin(k1_lat_center) + cos(lat)*cos(k1_lat_center)*cos(lon-k1_lon_center))
+      k2 = 1._r8
+
+      r = k1 / (4._r8*k2)
+      det = sqrt(r*r + 2._r8*cly_constant*r)
+
+!      fout  = (det-r)
+      fout = cly_constant/2._r8 - (det-r)/2._r8
     case default
-      call endrun("Illegal funcnum_arg in test_func")
+!      call endrun("Illegal funcnum_arg in test_func")
+      fout = 1.0_r8
     end select
   end function test_func
 

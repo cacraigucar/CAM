@@ -19,13 +19,20 @@ module control_mod
   integer, public  :: tstep_type= 0                           ! 0 = leapfrog
                                                               ! 1 = RK (foward-in-time)
   integer, public  :: rk_stage_user  = 0                      ! number of RK stages to use
-  integer, public  :: ftype = 0                               ! Forcing Type
+  integer, public  :: ftype = 2                               ! Forcing Type
+  integer, public  :: ftype_conserve = 1  !conserve momentum (dp*u)
   integer, public  :: statediag_numtrac = 3          
 
   integer, public :: qsplit = 1           ! ratio of dynamics tsteps to tracer tsteps
-  integer, public :: rsplit = 3           ! for vertically lagrangian dynamics, apply remap
+  integer, public :: rsplit =-1           ! for vertically lagrangian dynamics, apply remap
                                           ! every rsplit tracer timesteps
+  logical, public :: variable_nsplit=.false.
 
+  integer, public :: phys_dyn_cp = 0 !=0; no thermal energy scaling of T increment
+                                     !=1; scale increment for cp consistency between dynamics and physics
+
+  logical, public :: del2_physics_tendencies=.false.
+  
   logical, public :: refined_mesh
 
 ! vert_remap_q_alg:    0  default value, Zerroukat monotonic splines
@@ -73,6 +80,7 @@ module control_mod
   real (kind=r8), public :: nu_p    = 0.0D5           ! default = 0    ps equ. viscosity
   real (kind=r8), public :: nu_top  = 0.0D5           ! top-of-the-model viscosity
   integer, public :: hypervis_subcycle=1    ! number of subcycles for hyper viscsosity timestep
+  integer, public :: hypervis_subcycle_sponge=1    ! number of subcycles for hyper viscsosity timestep in sponge
   integer, public :: hypervis_subcycle_q=1  ! number of subcycles for hyper viscsosity timestep on TRACERS
   integer, public :: psurf_vis = 0        ! 0 = use laplace on eta surfaces
                                           ! 1 = use (approx.) laplace on p surfaces
@@ -106,7 +114,7 @@ module control_mod
   integer,               public :: se_met_tevolve = 0     ! switch to turn on time evolution of nudging within dynamics
   integer,               public :: prescribed_vertwind = 0
 
-  real (kind=r8), public :: initial_global_ave_dry_ps = 0 ! scale dry surface pressure to initial_global_ave_dry_ps
+  real (kind=r8), public :: initial_global_ave_dry_ps = 0._r8 ! scale dry surface pressure to initial_global_ave_dry_ps
 
   integer, public, parameter :: west  = 1
   integer, public, parameter :: east  = 2
@@ -119,5 +127,11 @@ module control_mod
   integer, public, parameter :: neast = 8
 
   logical, public :: disable_diagnostics = .FALSE.
-
+  !
+  ! parameters for sponge layer Rayleigh damping
+  !
+  real(r8), public :: raytau0
+  real(r8), public :: raykrange
+  integer,  public :: rayk0 
+  
 end module control_mod

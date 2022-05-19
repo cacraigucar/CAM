@@ -46,6 +46,7 @@ use English;
 use File::Basename;
 use Getopt::Long;
 use IO::File;
+use List::Util 'first';
 use FindBin qw($Bin);
 use lib "$Bin/perl5lib";
 use Build::ChemNamelist qw(set_dep_lists set_aero_modes_info chem_has_species);
@@ -483,7 +484,7 @@ add_default($nl, 'flds_co2c',      'val'=>'.false.');
 add_default($nl, 'cplflds_custom', 'val'=>'');
 
 ############################
-# namelist group: ccsm_pes #
+# namelist group: cime_pes #
 ############################
 
 # By default the driver sets all components to use all tasks.  This is the
@@ -513,10 +514,7 @@ if ($smp) {
     if ($nthreads) {
         add_default($nl, 'atm_nthreads', 'val'=>$nthreads);
         add_default($nl, 'cpl_nthreads', 'val'=>$nthreads);
-        add_default($nl, 'ice_nthreads', 'val'=>$nthreads);
-        add_default($nl, 'lnd_nthreads', 'val'=>$nthreads);
         add_default($nl, 'ocn_nthreads', 'val'=>$nthreads);
-        add_default($nl, 'rof_nthreads', 'val'=>$nthreads);
     }
 }
 
@@ -535,7 +533,6 @@ add_default($nl, 'cime_model', 'val'=>'cesm');
 # CESM driver defaults
 add_default($nl, 'coldair_outbreak_mod', 'val'=>'.true.');
 add_default($nl, 'flux_max_iteration', 'val'=>'5');
-add_default($nl, 'gust_fac', 'val'=>'0');
 
 # Spectral Element dycore
 my $dyn = $cfg->get('dyn');
@@ -573,7 +570,7 @@ if ($phys eq 'adiabatic') {
     ++$phys_mode_flags;
 }
 my $ideal_mode = 0;
-if ($phys eq 'kessler' or $phys eq 'held_suarez') {
+if ($phys eq 'kessler' or $phys eq 'held_suarez' or $phys eq 'tj2016') {
     $ideal_mode = 1;
     ++$phys_mode_flags;
 }
@@ -658,17 +655,17 @@ my $prog_species = $cfg->get('prog_species');
 my $prog_ghg1    = ($chem =~ "trop_mozart" or $chem =~ "trop_strat" or $chem =~ "ghg" or $chem =~ "_sc" or $prog_species =~ "GHG");
 my $prog_ghg2    = ($chem =~ "ghg" or $chem =~ "_sc" or $prog_species =~ "GHG");
 my $ghg_chem     = ($chem =~ "ghg" or $chem =~ "_sc");
-my $aero_chem    = ($chem =~ "aero" or $chem eq 'trop_mozart' or $chem =~ 'trop_strat' or $chem =~ 'tsmlt' or $chem eq 'trop_bam');
+my $aero_chem    = ($chem =~ "aero" or $chem eq 'trop_mozart' or $chem =~ 'trop_strat' or $chem =~ 'tsmlt');
 
 my $chem_rad_passive = ($nl->get_value('chem_rad_passive') =~ /$TRUE/io);
 my $ipcc_aircraft_emis = ($nl->get_value('ipcc_aircraft_emis') =~ /$TRUE/io);
 
 my $rad_prog_ocarb = (($prog_species =~ "OC"   or $aero_chem) and !($chem_rad_passive));
 my $rad_prog_bcarb = (($prog_species =~ "BC"   or $aero_chem) and !($chem_rad_passive));
-my $rad_prog_sulf  = (($prog_species =~ "SO4"  or $aero_chem or $chem =~ "super_fast_llnl") and !($chem_rad_passive));
+my $rad_prog_sulf  = (($prog_species =~ "SO4"  or $aero_chem) and !($chem_rad_passive));
 my $rad_prog_dust  = (($prog_species =~ "DST"  or $aero_chem) and !($chem_rad_passive));
 my $rad_prog_sslt  = (($prog_species =~ "SSLT" or $aero_chem) and !($chem_rad_passive));
-my $rad_prog_ozone = (($chem =~ "mozart" or $chem =~ "waccm_ma" or $chem =~ "tsmlt" or $chem =~ "trop_strat" or $chem =~ "super_fast_llnl") and !($chem_rad_passive));
+my $rad_prog_ozone = (($chem =~ "mozart" or $chem =~ "waccm_ma" or $chem =~ "tsmlt" or $chem =~ "trop_strat") and !($chem_rad_passive));
 
 # Check for eruptive volcano emissions.  These will be radiatively active by default, but
 # only if using BAM and the camrt radiation package
@@ -892,6 +889,24 @@ if ($co2_cycle) {
         if ($nl->get_value('co2_readflux_fuel') =~ /$TRUE/io) {
             add_default($nl, 'co2flux_fuel_file', 'sim_year'=>$sim_year);
         }
+
+        add_default($nl, 'co2_readflux_aircraft', 'val'=>'.true.');
+
+        # Check whether user has explicitly turned off reading the aircraft CO2 dataset.
+        # (user specification has higher precedence than the true value set above)
+        if ($nl->get_value('co2_readflux_aircraft') =~ /$TRUE/io) {
+
+            my $rel_filepath = get_default_value('ac_CO2_emis');
+            my $emisval = quote_string('ac_CO2 -> ' . $rel_filepath);
+            add_default($nl, 'aircraft_specifier', 'val'=>$emisval);
+
+            add_default($nl, 'aircraft_datapath');
+            add_default($nl, 'aircraft_type');
+            # This should be the same file as the one in the aircraft_specifier file.
+            # This is a workaround to get this filepath into the cam.input_data_list file
+            # to allow the CESM scripts to obtain all required data for a run.
+            add_default($nl, 'aircraft_co2_file');
+        }
     }
 }
 
@@ -1003,9 +1018,7 @@ if ($rad_prog_ozone) {
     die "ERROR: can not set ozone rad_climate specification\n";
 }
 
-if (($chem =~ /super_fast_llnl/) and !$chem_rad_passive ) {
-    $radval .= ",'N:N2O:N2O','N:prsd_ch4:CH4','N:CFC11:CFC11','N:CFC12:CFC12'";
-} elsif ((($chem =~ /waccm_ma/) or ($chem =~ /waccm_sc_mam/) or ($chem =~ /waccm_tsmlt/) or ($chem =~ /trop_strat/)) and !$chem_rad_passive ) {
+if ((($chem =~ /waccm_ma/) or ($chem =~ /waccm_sc_mam/) or ($chem =~ /waccm_tsmlt/) or ($chem =~ /trop_strat/)) and !$chem_rad_passive ) {
     $radval .= ",'A:N2O:N2O','A:CH4:CH4','N:CFC11STAR:CFC11','A:CFC12:CFC12'";
 } elsif ($prog_ghg1 and $prog_ghg2 and !$chem_rad_passive ) {
     $radval .= ",'A:N2O:N2O','A:CH4:CH4','A:CFC11:CFC11','A:CFC12:CFC12'";
@@ -1649,6 +1662,17 @@ if ( $nl->get_value('modal_strat_sulfate')=~ /$TRUE/io and
     die "Cannot set both modal_strat_sulfate and prescribed_strataero_feedback to TRUE \n";
 }
 
+# check O3S_Loss setting ...
+if (chem_has_species($cfg, 'O3S')) {
+    add_default($nl, 'rxn_rate_sums');
+    my $rate_sums = $nl->get_value('rxn_rate_sums');
+    if ($rate_sums =~ /O3S_Loss.*=/) {
+	if ($print>=2) { print "OK rxn_rate_sums includes O3S_Loss \n"; }
+    } else {
+	die "Must specify O3S_Loss in rxn_rate_sums \n";
+    }
+}
+
 # stratospheric aerosols are needed for heterogeneous chemistry as well as radiation feedback
 my $het_chem = chem_has_species($cfg, 'N2O5');
 
@@ -1744,6 +1768,10 @@ if ($chem =~ /waccm_sc/) {
     unless (defined $nl->get_value('waccm_forcing_file')) {
         add_default($nl, 'waccm_forcing_datapath');
         add_default($nl, 'waccm_forcing_file');
+    }
+    unless (defined $nl->get_value('waccm_forcing_type')) {
+        add_default($nl, 'waccm_forcing_type', 'val'=>'CYCLICAL');
+        add_default($nl, 'waccm_forcing_cycle_yr');
     }
     add_default($nl, 'nlte_use_mo', 'val'=>".false.");
     add_default($nl, 'h2orates');
@@ -2107,294 +2135,7 @@ if ($chem =~ /trop_mozart/ or $chem =~ /trop_strat/ or $chem =~ /waccm_tsmlt/) {
     }
 }
 
-# Prognostic aerosols via CAM-Chem package.
-# BAM settings
-if ($chem eq 'trop_bam') {
-
-    my %species;
-
-    # Surface emission datasets:
-    %species = ();
-    %species = ('CB1      -> ' => 'cb1_emis_bam',
-                'DMS      -> ' => 'dms_emis_bam',
-                'OC1      -> ' => 'oc1_emis_bam',
-                'SO2      -> ' => 'so2_emis_bam',
-                'SO4      -> ' => 'so4_emis_bam', );
-    my $first = 1;
-    my $pre = "";
-    my $val = "";
-    foreach my $id (sort keys %species) {
-        my $rel_filepath = get_default_value($species{$id});
-        my $abs_filepath = set_abs_filepath($rel_filepath, $inputdata_rootdir);
-        $val .= $pre . quote_string($id . $abs_filepath);
-        if ($first) {
-            $pre = ",";
-            $first = 0;
-        }
-    }
-    add_default($nl, 'srf_emis_specifier', 'val'=>$val);
-    add_default($nl, 'srf_emis_type',      'val'=>'CYCLICAL');
-
-    # Surface emission datasets:
-    %species = ();
-    %species = ('SO2      -> ' => 'so2_vrt_emis_file',
-                'SO4      -> ' => 'so4_vrt_emis_file', );
-    $first = 1;
-    $pre = "";
-    $val = "";
-    foreach my $id (sort keys %species) {
-        my $rel_filepath = get_default_value($species{$id});
-        my $abs_filepath = set_abs_filepath($rel_filepath, $inputdata_rootdir);
-        $val .= $pre . quote_string($id . $abs_filepath);
-        if ($first) {
-            $pre = ",";
-            $first = 0;
-        }
-    }
-    add_default($nl, 'ext_frc_specifier', 'val'=>$val);
-    add_default($nl, 'ext_frc_type',      'val'=>'CYCLICAL');
-
-    # Prescribed species
-    add_default($nl, 'tracer_cnst_specifier', 'val'=>"'O3','OH','NO3','HO2'");
-
-    my @files = ('tracer_cnst_datapath', 'tracer_cnst_file');
-    foreach my $file (@files) {
-        add_default($nl, $file, 'ver'=>'fixed_ox');
-    }
-    unless (defined $nl->get_value('tracer_cnst_type')) {
-        add_default($nl, 'tracer_cnst_type',    'ver'=>'fixed_ox');
-        add_default($nl, 'tracer_cnst_cycle_yr','ver'=>'fixed_ox');
-    }
-
-    add_default($nl, 'fstrat_list', 'val'=>"' '");
-    add_default($nl, 'flbc_list', 'val'=>"' '");
-
-    # Datasets
-    my @files = ( 'soil_erod_file','xs_coef_file','xs_short_file','xs_long_file', 'rsf_file', 'exo_coldens_file' );
-    foreach my $file (@files) {
-        add_default($nl, $file);
-    }
-}
-
-if ($chem eq 'super_fast_llnl') {
-    # Surface emission datasets:
-    my $val;
-    my %species;
-    %species = (
-                'CH2O     -> ' => 'ch2o_emis_file',
-                'CO       -> ' => 'co_emis_file',
-                'DMS      -> ' => 'dms_emis_file',
-                'NO       -> ' => 'nox_emis_file',
-                'SO2      -> ' => 'so2_emis_file',
-                );
-    if (! $megan_emis ) {
-      %species = ( %species,
-                'ISOP     -> ' => 'isop_emis_file',  );
-    }
-    unless (defined $nl->get_value('srf_emis_type')) {
-        add_default($nl, 'srf_emis_cycle_yr',  'val'=>'1997');
-        add_default($nl, 'srf_emis_type',  'val'=>'CYCLICAL');
-    }
-    my $first = 1; my $pre = "";
-    foreach my $id (sort keys %species) {
-        my $rel_filepath = get_default_value($species{$id});
-        my $abs_filepath = set_abs_filepath($rel_filepath, $inputdata_rootdir);
-        $val .= $pre . quote_string($id . $abs_filepath);
-        if ($first) {
-            $pre = ",";
-            $first = 0;
-        }
-    }
-    add_default($nl, 'srf_emis_specifier', 'val'=>$val);
-
-    # vertical emissions...
-    %species = ();
-    %species = ('SO2 -> ' => 'so2_vrt_emis_file',
-                'SO4 -> ' => 'so4_vrt_emis_file' );
-    add_default($nl, 'ext_frc_type', 'val'=>"'CYCLICAL'");
-
-    if ($ipcc_aircraft_emis) {
-      %species = ('SO2 -> ' => 'so2_vrt_emis_file',
-                  'SO4 -> ' => 'so4_vrt_emis_file',
-                  'NO2 -> ' => 'no2_aircraft_emis_file' );
-    }
-
-    $first = 1; $pre = ""; $val = "";
-    foreach my $id (sort keys %species) {
-        my $rel_filepath = get_default_value($species{$id});
-        my $abs_filepath = set_abs_filepath($rel_filepath, $inputdata_rootdir);
-        $val .= $pre . quote_string($id . $abs_filepath);
-        if ($first) {
-            $pre = ",";
-            $first = 0;
-        }
-    }
-    add_default($nl, 'ext_frc_specifier', 'val'=>$val);
-
-    # Species with fixed stratosphere values
-    $val = "'NO','NO2','HNO3','CO'";
-    add_default($nl, 'fstrat_list', 'val'=>$val);
-
-    # Datasets
-    my @files = ('airpl_emis_file', 'soil_erod_file', 'flbc_file', 'fstrat_file',
-                 'sulf_file', 'tuv_xsect_file', 'o2_xsect_file', 'xs_long_file', 'rsf_file',
-                 'exo_coldens_file', 'linoz_data_path', 'linoz_data_file', 'chlorine_loading_file' );
-    foreach my $file (@files) {
-        add_default($nl, $file);
-    }
-    unless (defined $nl->get_value('flbc_type')) {
-        add_default($nl, 'flbc_type',  'val'=>'CYCLICAL');
-        add_default($nl, 'flbc_cycle_yr',  'val'=>'1990');
-    }
-    unless (defined $nl->get_value('chlorine_loading_type')) {
-        add_default($nl, 'chlorine_loading_type', 'val'=>'FIXED');
-        add_default($nl, 'chlorine_loading_fixed_ymd','val'=>'19900101');
-    }
-
-    add_default($nl, 'xactive_prates', 'val'=>'.false.');
-
-    # Prescribed methane
-    my $val = "'CH4'";
-    add_default($nl, 'tracer_cnst_specifier', 'val'=>$val);
-    my @files = ( 'tracer_cnst_datapath','tracer_cnst_file', 'tracer_cnst_filelist');
-    foreach my $file (@files) {
-        add_default($nl, $file, 'ver'=>'fixed_ch4');
-    }
-    unless (defined $nl->get_value('tracer_cnst_type')) {
-        add_default($nl, 'tracer_cnst_type',    'ver'=>'fixed_ch4');
-        add_default($nl, 'tracer_cnst_cycle_yr','ver'=>'fixed_ch4');
-    }
-
-    my $val = "'prsd_ch4:CH4'";
-    add_default($nl, 'prescribed_ghg_specifier', 'val'=>$val);
-    my @files = ( 'prescribed_ghg_datapath','prescribed_ghg_file', 'prescribed_ghg_filelist');
-    foreach my $file (@files) {
-        add_default($nl, $file, 'ver'=>'fixed_ch4');
-    }
-    unless (defined $nl->get_value('prescribed_ghg_type')) {
-        add_default($nl, 'prescribed_ghg_type',    'ver'=>'fixed_ch4');
-        add_default($nl, 'prescribed_ghg_cycle_yr','ver'=>'fixed_ch4');
-    }
-}
-
 # MAM settings
-
-if ($chem eq 'super_fast_llnl_mam3') {
-
-    # Surface emission datasets:
-    my $val;
-    my %species;
-    my %verhash = ('ver'=>'mam');
-    %species = (
-                'CH2O   -> ' => 'ch2o_emis_file',
-                'CO     -> ' => 'co_emis_file',
-                'DMS    -> ' => 'dms_emis_file',
-                'NO     -> ' => 'nox_emis_file',
-                'SO2    -> ' => 'so2_emis_file',
-                'SOAG   -> ' => 'soag_emis_file',
-                'bc_a1  -> ' => 'bc_a1_emis_file',
-                'pom_a1 -> ' => 'pom_a1_emis_file',
-                'so4_a1 -> ' => 'so4_a1_emis_file',
-                'so4_a2 -> ' => 'so4_a2_emis_file',
-                'num_a1 -> ' => 'num_a1_emis_file',
-                'num_a2 -> ' => 'num_a2_emis_file',
-                );
-    if (! $megan_emis ) {
-      %species = ( %species,
-                'ISOP   -> ' => 'isop_emis_file',  );
-    }
-
-    my $first = 1; my $pre = "";
-    foreach my $id (sort keys %species) {
-        my $rel_filepath = get_default_value($species{$id}, \%verhash );
-        my $abs_filepath = set_abs_filepath($rel_filepath, $inputdata_rootdir);
-        $val .= $pre . quote_string($id . $abs_filepath);
-        if ($first) {
-            $pre = ",";
-            $first = 0;
-        }
-    }
-    add_default($nl, 'srf_emis_specifier', 'val'=>$val);
-    unless (defined $nl->get_value('srf_emis_type')) {
-        add_default($nl, 'srf_emis_type',      'val'=>'CYCLICAL');
-        add_default($nl, 'srf_emis_cycle_yr',  'val'=>2000);
-    }
-
-    # vertical emissions...
-    %species = ();
-    %species = ('SO2         -> ' => 'so2_ext_file',
-                'so4_a1      -> ' => 'so4_a1_ext_file',
-                'so4_a2      -> ' => 'so4_a2_ext_file',
-                'pom_a1      -> ' => 'pom_a1_ext_file',
-                'bc_a1       -> ' => 'bc_a1_ext_file',
-                'num_a1      -> ' => 'num_a1_ext_file',
-                'num_a2      -> ' => 'num_a2_ext_file', );
-
-    $first = 1; $pre = ""; $val = "";
-    foreach my $id (sort keys %species) {
-        my $rel_filepath = get_default_value($species{$id}, \%verhash );
-        my $abs_filepath = set_abs_filepath($rel_filepath, $inputdata_rootdir);
-        $val .= $pre . quote_string($id . $abs_filepath);
-        if ($first) {
-            $pre = ",";
-            $first = 0;
-        }
-    }
-    add_default($nl, 'ext_frc_specifier', 'val'=>$val);
-    unless (defined $nl->get_value('ext_frc_type')) {
-        add_default($nl, 'ext_frc_type', 'val'=>"'CYCLICAL'");
-        add_default($nl, 'ext_frc_cycle_yr',  'val'=>2000);
-    }
-
-    # Species with fixed stratosphere values
-    $val = "'NO','NO2','HNO3','CO'";
-    add_default($nl, 'fstrat_list', 'val'=>$val);
-
-    # Datasets
-    my @files = ('airpl_emis_file', 'soil_erod_file', 'flbc_file', 'fstrat_file',
-                 'sulf_file', 'tuv_xsect_file', 'o2_xsect_file', 'xs_long_file', 'rsf_file',
-                 'exo_coldens_file',
-                 'linoz_data_path' , 'linoz_data_file', 'chlorine_loading_file' );
-    foreach my $file (@files) {
-        add_default($nl, $file);
-    }
-    unless (defined $nl->get_value('flbc_type')) {
-        add_default($nl, 'flbc_type',  'val'=>'CYCLICAL');
-        add_default($nl, 'flbc_cycle_yr',  'val'=>'2000');
-    }
-    unless (defined $nl->get_value('linoz_data_type')) {
-        add_default($nl, 'linoz_data_type',  'val'=>'CYCLICAL');
-        add_default($nl, 'linoz_data_cycle_yr',  'val'=>'0');
-    }
-    unless (defined $nl->get_value('chlorine_loading_type')) {
-        add_default($nl, 'chlorine_loading_type',  'val'=>'FIXED');
-        add_default($nl, 'chlorine_loading_fixed_ymd',  'val'=>'20000101');
-    }
-    add_default($nl, 'xactive_prates', 'val'=>'.false.');
-
-    # Prescribed methane
-    my $val = "'CH4'";
-    add_default($nl, 'tracer_cnst_specifier', 'val'=>$val);
-    my @files = ( 'tracer_cnst_datapath','tracer_cnst_file', 'tracer_cnst_filelist');
-    foreach my $file (@files) {
-        add_default($nl, $file, 'ver'=>'fixed_ch4');
-    }
-    unless (defined $nl->get_value('tracer_cnst_type')) {
-        add_default($nl, 'tracer_cnst_type',    'ver'=>'fixed_ch4');
-        add_default($nl, 'tracer_cnst_cycle_yr','ver'=>'fixed_ch4');
-    }
-
-    my $val = "'prsd_ch4:CH4'";
-    add_default($nl, 'prescribed_ghg_specifier', 'val'=>$val);
-    my @files = ( 'prescribed_ghg_datapath','prescribed_ghg_file', 'prescribed_ghg_filelist');
-    foreach my $file (@files) {
-        add_default($nl, $file, 'ver'=>'fixed_ch4');
-    }
-    unless (defined $nl->get_value('prescribed_ghg_type')) {
-        add_default($nl, 'prescribed_ghg_type',    'ver'=>'fixed_ch4');
-        add_default($nl, 'prescribed_ghg_cycle_yr','ver'=>'fixed_ch4');
-    }
-}
 
 if ($chem eq 'trop_mam3') {
 
@@ -2515,9 +2256,16 @@ if ($chem =~ /_mam4/ and $phys =~ /cam6/) {
                 'num_a4_bc_srf_file'  => 'num_a4',
                 'num_a4_oc_srf_file'  => 'num_a4',
                 'num_a4_bb_srf_file'  => 'num_a4',
-                'num_pom_bb_srf_file' => 'num_a4',
+                'num_pom_bb_srf_file' => 'num_a4' );
+    if ($chem =~ /_vbsext/) {
+      %species = (%species,
+                'pom_a4_an_srf_file'  => 'pomff1_a4',
+                'pom_a4_bb_srf_file'  => 'pombb1_a4' );
+    } else {
+      %species = (%species,
                 'pom_a4_an_srf_file'  => 'pom_a4',
                 'pom_a4_bb_srf_file'  => 'pom_a4' );
+    }
 
     # for mechanism missing full tropospheric chemistry
     if ($chem =~ /trop_mam/ or $chem =~ /waccm_ma/ or $chem =~ /waccm_sc/) {
@@ -2592,11 +2340,20 @@ if ($chem =~ /_mam4/ and $phys =~ /cam6/) {
                     'TOLUENE_bb_srf_file' => 'TOLUENE',
                     'XYLENES_an_srf_file' => 'XYLENES',
                     'XYLENES_bb_srf_file' => 'XYLENES',
+                    'E90_srf_file' => 'E90' );
+        if ($chem =~ /_vbsext/) {
+            %species = (%species,
+                    'IVOC_an_srf_file' => 'IVOCff',
+                    'IVOC_bb_srf_file' => 'IVOCbb',
+                    'SVOC_an_srf_file' => 'SVOCff',
+                    'SVOC_bb_srf_file' => 'SVOCbb' );
+        } else {
+            %species = (%species,
                     'IVOC_an_srf_file' => 'IVOC',
                     'IVOC_bb_srf_file' => 'IVOC',
                     'SVOC_an_srf_file' => 'SVOC',
-                    'SVOC_bb_srf_file' => 'SVOC',
-                    'E90_srf_file' => 'E90' );
+                    'SVOC_bb_srf_file' => 'SVOC' );
+        }
     }
 
     my %verhash = ('ver'=>'cam6');
@@ -2850,7 +2607,7 @@ if ($chem =~ /waccm_ma/ or $chem =~ /waccm_tsmlt/) {
     # Species with fixed lower boundary
     my $val = "'CCL4','CF2CLBR','CF3BR','CFC11','CFC113','CFC12','CH3BR','CH3CCL3','CH3CL','CH4','CO2'"
              .",'H2','HCFC22','N2O','CFC114','CFC115','HCFC141B','HCFC142B','CH2BR2','CHBR3','H2402'";
-    if ($chem =~ /waccm_ma/) {
+    if (chem_has_species($cfg, 'H1202')) {
       $val .= ",'H1202'";
     }
     if ($chem_has_ocs) {
@@ -2867,7 +2624,7 @@ if ($chem =~ /waccm_ma/ or $chem =~ /waccm_tsmlt/) {
     }
 
     # Datasets
-    my @files = ('flbc_file', 'efield_lflux_file', 'efield_hflux_file', 'efield_wei96_file',
+    my @files = ('flbc_file', 'efield_lflux_file', 'efield_hflux_file',
                  'photon_file', 'electron_file', 'igrf_geomag_coefs_file',
                  'euvac_file', 'solar_parms_data_file',
                  'depvel_lnd_file', 'clim_soilw_file', 'season_wes_file',
@@ -2938,6 +2695,9 @@ if ($chem =~ /waccm_ma/ or $chem =~ /waccm_tsmlt/) {
     if ($dyn eq 'fv') {
         add_default($nl, 'do_circulation_diags', 'val'=>'.true.');
     }
+
+    # max cross cap electric potential of 120 kV to keep WACCM stable through large geo-mag storms
+    add_default($nl, 'efield_potential_max', 'val'=>'120.D0');
 }
 
 # Determine the source of the prescribed GHG values.
@@ -3073,6 +2833,9 @@ if ($waccmx) {
     add_default($nl,'wei05_coefs_file');
     add_default($nl,'solar_wind_data_file');
   }
+  add_default($nl,'ionos_xport_nsplit');
+  add_default($nl,'steady_state_ion_elec_temp', 'val'=>'.false.');
+  add_default($nl,'oplus_ring_polar_filter');
 }
 
 # Chemistry options
@@ -3116,6 +2879,12 @@ if (defined $cam_chempkg) {
 $cam_chempkg = "'" . "$chem" . "'";  # add quotes to this string value
 
 $nl->set_variable_value('phys_ctl_nl', 'cam_chempkg', $cam_chempkg);
+
+
+# Check the snapshot settings.
+add_default($nl, 'cam_snapshot_before_num');
+add_default($nl, 'cam_snapshot_after_num');
+check_snapshot_settings();
 
 # Tropopause climatology
 if (!$simple_phys) {
@@ -3162,6 +2931,10 @@ if ($cfg->get('microphys') =~ /^mg/) {
     add_default($nl, 'micro_mg_berg_eff_factor');
     add_default($nl, 'nucleate_ice_incloud');
     add_default($nl, 'nucleate_ice_strat');
+    add_default($nl, 'micro_mg_do_hail');
+    add_default($nl, 'micro_mg_do_graupel');
+    add_default($nl, 'graupel_in_rad');
+    add_default($nl, 'micro_do_massless_droplet_destroyer');
 
     # For CESM2, the decision was made to set micro_do_sb_physics to false
     add_default($nl, 'micro_do_sb_physics', 'val'=>'.false.');
@@ -3207,6 +2980,32 @@ if ($subcol_scheme eq 'tstcp') {
 
 if ($subcol_scheme eq 'SILHS') {
    add_default($nl, 'subcol_silhs_weight');
+   add_default($nl, 'subcol_silhs_var_covar_src');
+   add_default($nl, 'subcol_silhs_weight');
+   add_default($nl, 'subcol_silhs_numsubcol');
+   add_default($nl, 'subcol_silhs_corr_file_path');
+   add_default($nl, 'subcol_silhs_corr_file_name');
+   add_default($nl, 'subcol_silhs_meanice');
+   add_default($nl, 'subcol_silhs_q_to_micro');
+   add_default($nl, 'subcol_silhs_n_to_micro');
+   add_default($nl, 'subcol_silhs_constrainmn');
+   add_default($nl, 'subcol_silhs_use_clear_col');
+   add_default($nl, 'subcol_silhs_var_covar_src');
+   add_default($nl, 'subcol_silhs_ncnp2_on_ncnm2');
+   add_default($nl, 'subcol_silhs_hmp2_ip_on_hmm2_ip_intrcpt%rr');
+   add_default($nl, 'subcol_silhs_hmp2_ip_on_hmm2_ip_intrcpt%Nr');
+   add_default($nl, 'subcol_silhs_hmp2_ip_on_hmm2_ip_intrcpt%rs');
+   add_default($nl, 'subcol_silhs_hmp2_ip_on_hmm2_ip_intrcpt%Ns');
+   add_default($nl, 'subcol_silhs_hmp2_ip_on_hmm2_ip_intrcpt%ri');
+   add_default($nl, 'subcol_silhs_hmp2_ip_on_hmm2_ip_intrcpt%Ni');
+   add_default($nl, 'subcol_silhs_hmp2_ip_on_hmm2_ip_slope%rr');
+   add_default($nl, 'subcol_silhs_hmp2_ip_on_hmm2_ip_slope%Nr');
+   add_default($nl, 'subcol_silhs_hmp2_ip_on_hmm2_ip_slope%rs');
+   add_default($nl, 'subcol_silhs_hmp2_ip_on_hmm2_ip_slope%Ns');
+   add_default($nl, 'subcol_silhs_hmp2_ip_on_hmm2_ip_slope%ri');
+   add_default($nl, 'subcol_silhs_hmp2_ip_on_hmm2_ip_slope%Ni');
+
+
 }
 
 if ($subcol_scheme eq 'vamp') {
@@ -3231,36 +3030,67 @@ if ($clubb_sgs  =~ /$TRUE/io) {
    add_default($nl, 'clubb_history');
    add_default($nl, 'clubb_rad_history');
 
-   if ($nl->get_value('clubb_history') =~ "true" &&  $nl->get_value('atm_nthreads') != 1) {
+   if ($nl->get_value('clubb_history') =~ "true" &&  $nl->get_value('atm_nthreads') > 1) {
      die "$ProgName - ERROR: clubb_history = .true. with multiple threads is not supported. \n";
    }
+
+   add_default($nl, 'clubb_do_icesuper');
 
    add_default($nl, 'clubb_expldiff');
    add_default($nl, 'clubb_rainevap_turb');
    add_default($nl, 'clubb_cloudtop_cooling');
    add_default($nl, 'clubb_timestep');
    add_default($nl, 'clubb_rnevap_effic');
-   add_default($nl, 'clubb_stabcorrect');
 
+   add_default($nl, 'clubb_beta');
+   add_default($nl, 'clubb_c1');
+   add_default($nl, 'clubb_c1b');
    add_default($nl, 'clubb_c11');
    add_default($nl, 'clubb_c11b');
    add_default($nl, 'clubb_c14');
-   add_default($nl, 'clubb_mult_coef');
-   add_default($nl, 'clubb_gamma_coef');
-   add_default($nl, 'clubb_c_K10');
-   add_default($nl, 'clubb_c_K10h');
-   add_default($nl, 'clubb_beta');
    add_default($nl, 'clubb_C2rt');
    add_default($nl, 'clubb_C2thl');
    add_default($nl, 'clubb_C2rtthl');
-   add_default($nl, 'clubb_C8');
+   add_default($nl, 'clubb_C4');
    add_default($nl, 'clubb_C7');
    add_default($nl, 'clubb_C7b');
-   add_default($nl, 'clubb_lambda0_stability_coef');
-   add_default($nl, 'clubb_Skw_denom_coef');
-   add_default($nl, 'clubb_l_lscale_plume_centered');
-   add_default($nl, 'clubb_l_use_ice_latent');
+   add_default($nl, 'clubb_C8');
+   add_default($nl, 'clubb_C8b');
+   add_default($nl, 'clubb_c_K9');
+   add_default($nl, 'clubb_nu9');
+   add_default($nl, 'clubb_c_K10');
+   add_default($nl, 'clubb_c_K10h');
    add_default($nl, 'clubb_do_liqsupersat');
+   add_default($nl, 'clubb_gamma_coef');
+   add_default($nl, 'clubb_gamma_coefb');
+   add_default($nl, 'clubb_lambda0_stability_coef');
+   add_default($nl, 'clubb_lmin_coef');
+   add_default($nl, 'clubb_mult_coef');
+   add_default($nl, 'clubb_Skw_denom_coef');
+   add_default($nl, 'clubb_skw_max_mag');
+   add_default($nl, 'clubb_up2_vp2_factor');
+   add_default($nl, 'clubb_C_wp2_splat');
+
+   add_default($nl, 'clubb_l_brunt_vaisala_freq_moist');
+   add_default($nl, 'clubb_l_call_pdf_closure_twice');
+   add_default($nl, 'clubb_l_damp_wp3_Skw_squared');
+   add_default($nl, 'clubb_l_lscale_plume_centered');
+   add_default($nl, 'clubb_l_min_wp2_from_corr_wx');
+   add_default($nl, 'clubb_l_min_xp2_from_corr_wx');
+   add_default($nl, 'clubb_l_predict_upwp_vpwp');
+   add_default($nl, 'clubb_l_rcm_supersat_adj');
+   add_default($nl, 'clubb_l_stability_correct_tau_zm');
+   add_default($nl, 'clubb_l_trapezoidal_rule_zm');
+   add_default($nl, 'clubb_l_trapezoidal_rule_zt');
+   add_default($nl, 'clubb_l_upwind_xpyp_ta');
+   add_default($nl, 'clubb_l_use_C7_Richardson');
+   add_default($nl, 'clubb_l_use_C11_Richardson');
+   add_default($nl, 'clubb_l_use_cloud_cover');
+   add_default($nl, 'clubb_l_use_ice_latent');
+   add_default($nl, 'clubb_l_use_thvm_in_bv_freq');
+   add_default($nl, 'clubb_l_vert_avg_closure');
+   add_default($nl, 'clubb_l_diag_Lscale_from_tau');
+   add_default($nl, 'clubb_l_damp_wp2_using_em');
 }
 
 # Tuning for wet scavenging of modal aerosols
@@ -3485,6 +3315,7 @@ if ($waccm_phys or
        add_default($nl, 'qbo_forcing_file');
     }
     add_default($nl, 'gw_qbo_hdepth_scaling', 'val'=>$hdepth_scaling);
+    add_default($nl, 'gw_top_taper');
 } else {
     add_default($nl, 'use_gw_front'     , 'val'=>'.false.');
     add_default($nl, 'use_gw_convect_dp', 'val'=>'.false.');
@@ -3507,7 +3338,7 @@ if (!$simple_phys) {
 }
 # Mid-scale wavelength settings.
 if ($do_gw_front or $do_gw_convect_dp or $do_gw_convect_sh) {
-    add_default($nl, 'pgwv', 'val'=>'32');
+    add_default($nl, 'pgwv');
     add_default($nl, 'gw_dc','val'=>'2.5D0');
 } elsif (!$simple_phys) {
     add_default($nl, 'pgwv', 'val'=>'0');
@@ -3627,6 +3458,11 @@ if ($dyn eq 'fv') {
     add_default($nl, 'fv_del2coef');
     add_default($nl, 'fv_filtcw');
     add_default($nl, 'fv_nspltvrm');
+    add_default($nl, 'fv_am_correction');
+    add_default($nl, 'fv_am_fixer');
+    add_default($nl, 'fv_am_fix_lbl');
+    add_default($nl, 'fv_am_diag');
+
     if ($waccm_phys) {
         add_default($nl, 'fv_nsplit');
         add_default($nl, 'fv_nspltrac');
@@ -3697,13 +3533,14 @@ if ($dyn =~ /se/) {
     }
     add_default($nl, 'se_fv_nphys', 'val'=>$npg);
 
-    my $cslam = ($npg > 0) ? 1 : 0;
-    add_default($nl, 'se_ftype', 'cslam'=>$cslam);
-
     my @vars = qw(
+                  se_ftype
                   se_horz_num_threads
-                  se_hypervis_on_plevs
+                  se_hypervis_dynamic_ref_state
+                  se_lcp_moist
+		  se_large_Courant_incr
                   se_hypervis_subcycle
+                  se_hypervis_subcycle_sponge
                   se_hypervis_subcycle_q
                   se_limiter_option
                   se_nsplit
@@ -3720,22 +3557,34 @@ if ($dyn =~ /se/) {
                   se_tstep_type
                   se_vert_num_threads
                   se_vert_remap_q_alg
+		  se_fvm_supercycling
+		  se_fvm_supercycling_jet
+		  se_kmin_jet
+		  se_kmax_jet
+		  se_variable_nsplit
+		  se_phys_dyn_cp
+		  se_raytau0
+		  se_raykrange
+		  se_rayk0
         );
 
     my %opts;
 
-    # Do we need special refined mesh processing?
+    # Settings for refined mesh.
     add_default($nl, 'se_refined_mesh');
     my $refined_mesh = $nl->get_value('se_refined_mesh');
     if ($refined_mesh =~ m/$TRUE/i) {
         $opts{'refined_mesh'} = "1";
+
         add_default($nl, 'se_mesh_file');
         my $se_mesh_file = $nl->get_value('se_mesh_file');
-        if (!defined $se_mesh_file or ($refined_mesh =~ m/none/i) or ((length $refined_mesh) == 0)) {
+        if (!defined $se_mesh_file or ($se_mesh_file =~ m/none/i) or ((length $se_mesh_file) == 0)) {
             die "$ProgName - ERROR: se_mesh_file is required for a refined mesh run\n";
         }
+
         # We are in a refined mesh situation, set appropriate defaults
         $nl->set_variable_value('dyn_se_inparm', 'se_ne', 0);
+
         add_default($nl, 'se_hypervis_power');
         my $hypervis_power = $nl->get_value('se_hypervis_power');
         if ($hypervis_power == 0) {
@@ -3772,6 +3621,7 @@ add_default($nl, 'history_waccmx');
 add_default($nl, 'history_chemistry');
 add_default($nl, 'history_chemspecies_srf');
 add_default($nl, 'history_clubb');
+add_default($nl, 'history_dust');
 
 # The history output for the AMWG variability diagnostics assumes that auxilliary history
 # files h1, h2, and h3 contain daily, 6-hrly, and 3-hrly output respectively.  If this output
@@ -4032,6 +3882,12 @@ EOF
 
 }
 
+ if ($cam_build) {
+     add_default($nl, 'seq_flux_mct_albdif');
+     add_default($nl, 'seq_flux_mct_albdir');
+     add_default($nl, 'seq_flux_atmocn_minwind');
+ }
+
 #-----------------------------------------------------------------------------------------------
 # Rename component logfiles.
 #
@@ -4089,8 +3945,9 @@ foreach my $name (@nl_groups) { $nl_group{$name} = ''; }
 # Remove the group names from %nl_group as they are written.
 
 # Driver
-@comp_groups = qw(cime_driver_inst seq_cplflds_inparm seq_cplflds_userspec ccsm_pes
-    seq_infodata_inparm seq_timemgr_inparm prof_inparm papi_inparm pio_default_inparm);
+@comp_groups = qw(cime_driver_inst seq_cplflds_inparm seq_cplflds_userspec cime_pes
+    seq_infodata_inparm seq_timemgr_inparm prof_inparm papi_inparm pio_default_inparm esmf_inparm seq_flux_mct_inparm);
+
 $outfile = "$opts{'dir'}/drv_in";
 if ($cam_build) {
     $nl->write($outfile, 'groups'=>\@comp_groups);
@@ -4154,6 +4011,24 @@ if ($opts{'inputdata'}) {
 
 # END OF MAIN SCRIPT
 #===============================================================================================
+
+# This is a slow implementation of first_index from List::MoreUtils,
+# because that module does not seem to be generally available.
+sub first_index {
+  my $check_str = shift; # String to find in list
+  my @check_list = @_; # List of available strings
+  my $findex = -1;
+  my $lindex = 0;
+  foreach my $cstr (@check_list) {
+    if ($check_str eq $cstr) {
+      $findex = $lindex;
+      last;
+    } else {
+      $lindex++;
+    }
+  }
+    return $findex;
+}
 
 sub create_mode_defs {
 
@@ -4429,7 +4304,7 @@ sub check_input_files {
 
     my $fh;
     if (defined $inputdata_rootdir) {
-        open $fh, '>', $outfile or die "check_input_files: error opening $outfile: $!";
+        open $fh, '>>', $outfile or die "check_input_files: error opening $outfile: $!";
     }
 
     # Look through all namelist groups
@@ -4472,8 +4347,10 @@ sub check_input_files {
                     my $rootdir = $nl->get_variable_value($group, $rootdir_var);
                     $rootdir =~ s/['"]//g;          #"'
                     if ($inputdata_rootdir) {
-                        $pathname = "$rootdir/$pathname";
-                        print $fh "$var = $pathname\n";
+                        if ($pathname !~ m/^\s*$/) { # not 0 or more whitespace characters
+                            $pathname = "$rootdir/$pathname";
+                            print $fh "$var = $pathname\n";
+                        }
                     }
                     else {
                         if (-f "$rootdir/$pathname") {
@@ -4491,9 +4368,9 @@ sub check_input_files {
     # Treat special cases...
 
     # These namelist variables are arrays of strings.
-    my @vars = qw(ext_frc_specifier srf_emis_specifier mode_defs rad_climate rad_diag_1 rad_diag_2
-                  rad_diag_3 rad_diag_4 rad_diag_5 rad_diag_6 rad_diag_7 rad_diag_8
-                  rad_diag_9 rad_diag_10);
+    my @vars = qw(aircraft_specifier ext_frc_specifier srf_emis_specifier mode_defs
+                  rad_climate rad_diag_1 rad_diag_2 rad_diag_3 rad_diag_4 rad_diag_5
+                  rad_diag_6 rad_diag_7 rad_diag_8 rad_diag_9 rad_diag_10);
 
     foreach my $var (@vars) {
 
@@ -4529,6 +4406,17 @@ sub check_input_files {
                         my $coef = $1;
                         $file = $2;
                     }
+
+                    # The filenames in the aircraft_specifier strings are not absolute.  They are
+                    # relative to the root directory from aircraft_datapath.  Create absolute pathnames.
+                    if ($var eq 'aircraft_specifier') {
+                        my $datapath = $nl->get_value('aircraft_datapath');
+                        if (defined $datapath) {
+                            # set absolute filepath
+                            $file = set_abs_filepath($file, $datapath);
+                        }
+                    }
+
 
                     if ($inputdata_rootdir) {
                         print $fh "$var for $name = $file\n";
@@ -4613,6 +4501,179 @@ sub check_input_files {
     close $fh if defined $inputdata_rootdir;
 
     return 0;
+}
+
+#-----------------------------------------------------------------------------------------------
+
+sub check_snapshot_settings {
+
+    # This checks the snapshot settings
+
+    my $cam_take_snapshot_before = $nl->get_variable_value('phys_ctl_nl', 'cam_take_snapshot_before');
+    my $cam_take_snapshot_after  = $nl->get_variable_value('phys_ctl_nl', 'cam_take_snapshot_after');
+    my $cam_snapshot_before_num  =  $nl->get_variable_value('phys_ctl_nl', 'cam_snapshot_before_num');
+    my $cam_snapshot_after_num   =  $nl->get_variable_value('phys_ctl_nl', 'cam_snapshot_after_num');
+    my $microphys = $cfg->get('microphys');
+
+    if (($cam_snapshot_before_num >= 0) or ($cam_snapshot_after_num >= 0)) {
+        print  "cam_snapshot settings\n";
+        print "cam_take_snapshot_before = $cam_take_snapshot_before\n";
+        print "cam_take_snapshot_after  = $cam_take_snapshot_after\n";
+        print "cam_snapshot_before_num = $cam_snapshot_before_num\n";
+        print "cam_snapshot_after_num  = $cam_snapshot_after_num\n";
+    } else {
+        return;  # No snapshots are requested
+    }
+
+    # Set the empty_htapes always to false for snapshot runs
+    $nl->set_variable_value('cam_history_nl', 'empty_htapes', $FALSE);
+
+    # Check for "take_snapshot" and history file number both being set or not set.  Only one set is an error
+    if ( ((defined $cam_take_snapshot_before ) xor  (defined $cam_snapshot_before_num))) {
+        die "ERROR: cam_take_snapshot_before is set to $cam_take_snapshot_before \n and cam_snapshot_before_num is set to
+                      $cam_snapshot_before_num \n Both need to be set or not set";
+    }
+
+    if ( ((defined $cam_take_snapshot_after ) xor  (defined $cam_snapshot_after_num))) {
+        die "ERROR: cam_take_snapshot_after is set to $cam_take_snapshot_after \n and cam_snapshot_after_num is set to
+                      $cam_snapshot_after_num \n Both need to be set or not set";
+    }
+
+    # If a snapshot history file number is negative, turn off that snapshot
+    if ((defined $cam_snapshot_before_num) and ($cam_snapshot_before_num lt 0)) {
+        print "WARNING: No history file assigned to before snapshot, disabling\n";
+        $nl->set_variable_value('phys_ctl_nl', 'cam_take_snapshot_before', "'UNSET'");
+    }
+    if ((defined $cam_snapshot_after_num) and ($cam_snapshot_after_num lt 0)) {
+        print "WARNING: No history file assigned to after snapshot, disabling\n";
+        $nl->set_variable_value('phys_ctl_nl', 'cam_take_snapshot_after', "'UNSET'");
+    }
+
+
+    # Check for "cam_take_snapshot" values for before and after being compatible
+    # Due to the physics call structure, only some before/after pairs are valid
+    # After the appropriate check is found, return as no other checks will pertain
+
+    my $user_set_before = ((defined $cam_take_snapshot_before) and
+                               ($cam_take_snapshot_before eq "'user_set'"));
+    my $user_set_after = ((defined $cam_take_snapshot_after) and
+                              ($cam_take_snapshot_after eq "'user_set'"));
+    if ($user_set_before and $user_set_after) {
+        return; # This is okay, user will set before and after code
+    } elsif ($user_set_before and (not defined $cam_take_snapshot_after)) {
+        return; # This iis okay, user will set before code only
+    } elsif ($user_set_after and (not defined $cam_take_snapshot_before)) {
+        return; # This iis okay, user will set after code only
+    } # No else, just proceed with list checks
+    my @validList_bc = ();
+    my @validList_ac = ();
+    if ($user_set_before) {
+        # We cannot check order so mark all after matches okay.
+        push (@validList_ac, ("'user_set'"));
+        push (@validList_bc, ("'user_set'"));
+    }
+    if ($simple_phys) {
+        # Simple physpkg
+        push (@validList_ac, ("'physics_dme_adjust'"));
+        if ($phys eq 'held_suarez') {
+            push (@validList_bc, ("'held_suarez_tend'"));
+        } elsif ($phys eq 'kessler') {
+            push (@validList_bc, ("'kessler_tend'"));
+        } elsif ($phys eq 'tj2016') {
+            push (@validList_bc, ("'thatcher_jablonowski_precip_tend'"));
+        }
+        if ($chem ne 'none') {
+            push (@validList_bc, ("'chem_timestep_tend'"));
+        }
+    } else {
+        # CAM physpkg
+        push(@validList_ac, ("'chem_emissions'",
+                             "'aoa_tracers_timestep_tend'",
+                             "'co2_cycle_set_ptend'"));
+        if ($chem ne 'none') {
+            push (@validList_ac, ("'chem_timestep_tend'"));
+        }
+        push (@validList_ac, ("'vertical_diffusion_section'",
+                              "'aero_model_drydep'", "'gw_tend'",
+                              "'qbo_relax'", "'iondrag_calc_section'",
+                              "'physics_dme_adjust'"));
+        push (@validList_bc, ("'dadadj_tend'", "'convect_deep_tend'",
+                              "'convect_shallow_tend'"));
+        if ($microphys =~ /^mg/) {
+            if ($clubb_sgs  =~ /$TRUE/io) {
+                push (@validList_bc, ("'clubb_tend_cam'"));
+            } else {
+                push (@validList_bc, ("'macrop_driver_tend'"));
+            }
+            push (@validList_bc, ("'microp_section'"));
+            if ($use_subcol_microp =~ /$TRUE/io) {
+                push (@validList_bc, ("'microp_driver_tend_subcol'"));
+            }
+        }
+        push (@validList_bc, ("'aero_model_wetdep'", "'radiation_tend'"));
+    }
+    if ($user_set_after) {
+        # We cannot check order so mark all before matches okay.
+        push (@validList_ac, ("'user_set'"));
+        push (@validList_bc, ("'user_set'"));
+    }
+
+    my $before_index_bc = first_index($cam_take_snapshot_before, @validList_bc);
+    my $after_index_bc = first_index($cam_take_snapshot_after, @validList_bc);
+    my $before_index_ac = first_index($cam_take_snapshot_before, @validList_ac);
+    my $after_index_ac = first_index($cam_take_snapshot_after, @validList_ac);
+
+    # If before is set, it must be valid
+    if ((defined $cam_snapshot_before_num) and
+          ($cam_snapshot_before_num ge 0) and
+          (defined $cam_take_snapshot_before) and
+          (($before_index_ac lt 0) and ($before_index_bc lt 0))) {
+        die "ERROR: Invalid cam_take_snapshot_before setting, $cam_take_snapshot_before\n"
+    }
+    # If after is set, it must be valid
+    if ((defined $cam_snapshot_after_num) and
+          ($cam_snapshot_after_num ge 0) and
+          (defined $cam_take_snapshot_after) and
+          (($after_index_ac lt 0) and ($after_index_bc lt 0))) {
+        die "ERROR: Invalid cam_take_snapshot_after setting, $cam_take_snapshot_after\n"
+    }
+    # If at least one of before/after are not set requires no further checking
+    if (  (! defined $cam_take_snapshot_before) or
+          (! defined $cam_take_snapshot_after)) {
+        return;
+    }
+    # If either before or after is 'user_set', end checks
+    if ($user_set_before or $user_set_after) {
+        return;
+    }
+
+    # Some checks to do if both before and after snapshots are being used
+    if ((defined $cam_take_snapshot_before) and
+          ($cam_snapshot_before_num ge 0) and
+          (defined $cam_take_snapshot_after) and
+          ($cam_snapshot_after_num ge 0)) {
+        if ($before_index_ac ge 0) {
+            if ($after_index_bc ge 0) {
+                die "ERROR: before and after snapshots must both be in ",
+                  "tphysbc or both be in tphysac\n";
+            } elsif ($before_index_ac gt $after_index_ac) {
+                die "ERROR: cam_take_snapshot_before is set to ",
+                  "$cam_take_snapshot_before\n and cam_take_snapshot_after is ",
+                  "set to $cam_take_snapshot_after\n",
+                  "This combination is invalid\n";
+            }
+        } else {
+            if ($after_index_ac ge 0) {
+                die "ERROR: before and after snapshots must both be in ",
+                  "tphysbc or both be in tphysac\n";
+            } elsif ($before_index_bc gt $after_index_bc) {
+                die "ERROR: cam_take_snapshot_before is set to ",
+                  "$cam_take_snapshot_before\n and cam_take_snapshot_after is ",
+                  "set to $cam_take_snapshot_after\n",
+                  "This combination is invalid\n";
+            }
+        }
+    }
 }
 
 #-----------------------------------------------------------------------------------------------

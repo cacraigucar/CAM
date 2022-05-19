@@ -51,10 +51,12 @@
 !-----------------------------------------------------------------------
 
       use shr_kind_mod,  only: r8 => shr_kind_r8
-      use mo_constants,  only: pi, &
-                               gask => rgas_cgs
+      use mo_constants,  only: pi, gask => rgas_cgs
       use cam_logfile,   only: iulog
       use spmd_utils,    only: masterproc
+      use aurora_params, only: power=>hpower, plevel, aurora_params_set
+      use aurora_params, only: ctpoten, theta0, dskofa, offa, phid, rrad
+      use aurora_params, only: amie_period
 
       implicit none
 
@@ -65,6 +67,11 @@
 
       save
 
+
+      private
+      public :: aurora_inti, aurora_timestep_init, aurora
+      public :: aurora_register
+      
       integer, parameter  :: isouth = 1
       integer, parameter  :: inorth = 2
 
@@ -72,14 +79,15 @@
       real(r8), parameter :: grav   = 870._r8          ! (cm/s^2)
 
       integer  :: lev1 = 1
-      real(r8), parameter :: twopi = 2._r8*pi
       real(r8) :: rmass_o1
       real(r8) :: rmass_o2
       real(r8) :: rmass_n2
       real(r8) :: rmassinv_o1
       real(r8) :: rmassinv_o2
       real(r8) :: rmassinv_n2
-      real(r8), parameter :: dtr = pi/180._r8
+      real(r8), parameter :: twopi = 2._r8*pi
+      real(r8), parameter :: d2r = pi/180._r8
+      real(r8), parameter :: r2d = 180._r8/pi
 
 !-----------------------------------------------------------------------
 ! 	... polar drizzle parameters:
@@ -124,24 +132,13 @@
         e0,e20, &       ! e0 = average of noon and midnight electrons
         ree,re2, &      ! difference ratios of peak energy fluxes (ree=(e2-e1)/(e2+e1))
         alfa20          ! average of noon and midnight char energies for high alt aurora
-      real(r8) :: &
-        theta0(2), &    ! convection reversal boundary in radians
-        offa(2), &      ! offset of oval towards 0 MLT relative to magnetic pole (rad)
-        dskofa(2), &    ! offset of oval in radians towards 18 MLT (f(By))
-        phid(2), &      ! dayside convection entrance in MLT converted to radians (f(By))
-        rrad(2)         ! radius of auroral circle in radians
-      real(r8) :: ctpoten    ! cross-cap potential (kV)
-      real(r8) :: byimf      ! BY component of IMF (nT)
-
-
-      private
-      public :: aurora_inti, aurora_timestep_init, aurora
-      public :: aurora_register
 
       logical :: aurora_active = .false.
-      integer :: indxAIPRS = -1
+      integer :: indxAIPRS    = -1
+      integer :: indxQTe = -1
+      integer :: indxAMIEefxg = -1        ! am_amie_201712
+      integer :: indxAMIEkevg = -1        ! am_amie_201712
 
-      real(r8) :: byloc      ! local By
       real(r8), parameter :: h2deg = 15._r8   ! hour to degree
 
       contains
@@ -155,11 +152,12 @@
 
         ! add ionization rates to phys buffer for waccmx ionosphere module
 
-        call pbuf_add_field('AurIPRateSum' , 'physpkg', dtype_r8, (/pcols,pver/), indxAIPRS)     ! Sum of ion auroral production rates for O2
+        call pbuf_add_field('AurIPRateSum', 'physpkg', dtype_r8, (/pcols,pver/), indxAIPRS)     ! Sum of ion auroral production rates for O2
+        call pbuf_add_field('QTeAur', 'physpkg', dtype_r8, (/pcols/), indxQTe)     ! for electron temperature
 
       endsubroutine aurora_register
 
-      subroutine aurora_inti
+      subroutine aurora_inti(pbuf2d)
 !-----------------------------------------------------------------------
 ! 	... initialize aurora module
 !-----------------------------------------------------------------------
@@ -169,9 +167,13 @@
       use ref_pres,     only : pref_mid
       use mo_chem_utls, only : get_spc_ndx
       use cam_history,  only : addfld, horiz_only
+      use physics_buffer,only: pbuf_get_index
+      use infnan,       only : nan, assignment(=)
+      use physics_buffer, only: physics_buffer_desc, pbuf_set_field
 
       implicit none
 
+      type(physics_buffer_desc), pointer :: pbuf2d(:,:)
 !-----------------------------------------------------------------------
 ! 	... local variables
 !-----------------------------------------------------------------------
@@ -181,10 +183,26 @@
       real(r8) :: plb
       real(r8) :: alfa_1, alfa_2, alfa21, alfa22
       real(r8) :: e21, e22
+      integer  :: op_ndx,o2p_ndx,np_ndx,n2p_ndx,e_ndx
+      integer  :: ierr
+      real(r8) :: x_nan
 
-      integer :: op_ndx,o2p_ndx,np_ndx,n2p_ndx,e_ndx
+      indxAMIEefxg = pbuf_get_index('AMIE_efxg', errcode=ierr)
+      indxAMIEkevg = pbuf_get_index('AMIE_kevg', errcode=ierr)
 
-      byloc    = 0._r8
+      if (indxAMIEefxg>0 .and. indxAMIEkevg>0) then
+         x_nan = nan
+         call pbuf_set_field(pbuf2d, indxAMIEefxg, x_nan)
+         call pbuf_set_field(pbuf2d, indxAMIEkevg, x_nan)
+      endif
+
+      theta0(:) = nan
+      offa(:) = nan
+      dskofa(:) = nan
+      phid(:) = nan
+      rrad(:) = nan
+      ctpoten = nan
+      power   = nan
 
       op_ndx   = get_spc_ndx( 'Op' )
       o2p_ndx  = get_spc_ndx( 'O2p' )
@@ -214,10 +232,9 @@
       rmass_n2    = 2._r8*cnst_mw(m)
       rmassinv_n2 = 1._r8/rmass_n2
 
-      offa(isouth)   = 1.0_r8*dtr
-      offa(inorth)   = 1.0_r8*dtr
-      phid(isouth)   = (9.39_r8 + 0.21_r8*byloc - 12._r8) * h2deg * dtr
-      phid(inorth)   = (9.39_r8 - 0.21_r8*byloc - 12._r8) * h2deg * dtr
+      offa(isouth)   = 1.0_r8*d2r
+      offa(inorth)   = 1.0_r8*d2r
+
       alfa_1         = 1.5_r8
       alfa_2         = 2._r8
 
@@ -275,35 +292,24 @@
 
       end subroutine aurora_inti
 
-      subroutine aurora_timestep_init
+      subroutine aurora_timestep_init( )
 !-----------------------------------------------------------------------
 ! 	... per timestep initialization
 !-----------------------------------------------------------------------
 
-      use mag_parms,  only : get_mag_parms
-      use spmd_utils, only : masterproc
+      use heelis_mod,    only : heelis_update
 
 !-----------------------------------------------------------------------
 !	... local variables
 !-----------------------------------------------------------------------
-      real(r8) :: power, plevel
-      real(r8) :: roth, rote, rcp, rhp
-      real(r8) :: arad
+      real(r8) :: roth, rote
       real(r8), parameter :: convert = 3.1211e8_r8
 
       if (.not. aurora_active) return
 
-!-----------------------------------------------------------------------
-!	... get hemispheric power
-!-----------------------------------------------------------------------
-      call get_mag_parms( by = byimf, hpower = power, ctpoten = ctpoten )
-#ifdef AURORA_DIAGS
-      if( masterproc ) then
-         write(iulog,*) '----------------------------------------'
-         write(iulog,*) 'aurora_timestep_init: by,power,ctpoten = ',byimf,power,ctpoten
-         write(iulog,*) '----------------------------------------'
-      end if
-#endif
+      if (.not.aurora_params_set) then
+         call heelis_update() ! use heelis if aurora parameters are not already set
+      endif
 
       if( power >= 1.0_r8 ) then
          plevel = 2.09_r8*log( power )
@@ -311,16 +317,13 @@
          plevel = 0._r8
       end if
 
-!
-! Add limits to byimf if use the Heelis convection pattern,this is to have 
-! asymmetric dawn and dusk convection cells and By effect. Adapted from TIEGCM.
-! This is for now just a hook, since in the current setting byimf is likely 0.
-!
-      byloc = byimf ! init local from original namelist input
-!      If (potential_model == 'HEELIS') then
-        if (byloc > 7.0_r8) byloc = 7.0_r8
-        if (byloc < -11.0_r8) byloc = -11.0_r8         
-!      endif
+#ifdef AURORA_DIAGS
+      if( masterproc ) then
+         write(iulog,*) '----------------------------------------'
+         write(iulog,*) 'aurora_timestep_init: power,ctpoten = ',power,ctpoten
+         write(iulog,*) '----------------------------------------'
+      end if
+#endif
 
 !-----------------------------------------------------------------------
 ! h1 = Gaussian half-width of the noon auroral oval in degrees
@@ -339,13 +342,9 @@
 !-----------------------------------------------------------------------
 
       rh = (h2 - h1) / (h1 + h2)
-      h0     = 0.5_r8 * (h1 + h2) * dtr
-
-      theta0(isouth) = (-3.80_r8 + 8.48_r8*(ctpoten**.1875_r8))*dtr
-      theta0(inorth) = theta0(isouth)
-      dskofa(isouth) = 0._r8
-      dskofa(inorth) = dskofa(isouth)
-
+      h0     = 0.5_r8 * (h1 + h2) * d2r   
+      
+      
 ! roth = MLT of max width of aurora in hours
 ! rote = MLT of max energy flux of aurora in hours
 
@@ -354,8 +353,8 @@
 
 !  Convert MLT from hours to degrees to radians
 
-      rroth = roth * h2deg * dtr
-      rrote = rote * h2deg * dtr
+      rroth = roth * h2deg * d2r
+      rrote = rote * h2deg * d2r
 
 !-----------------------------------------------------------------------
 ! e1 = energy flux in the noon sector of the aurora (ergs/cm**2/s)
@@ -389,12 +388,6 @@
       e0  = 0.5_r8 * (e1 + e2)
       ree = (e2 - e1) / (e1 + e2)
 
-      rhp          = 14.20_r8 + 0.96_r8*plevel
-      rcp          = -0.43_r8 + 9.69_r8 * (ctpoten**.1875_r8)
-      arad         = max( rcp,rhp )
-      rrad(isouth) = arad*dtr 
-      rrad(inorth) = arad*dtr
-
       end subroutine aurora_timestep_init
 
       subroutine aurora_prod( tn, o2, o1, mbar, rlats, &
@@ -408,7 +401,7 @@
       use mo_apex,     only : maglon0
       use ppgrid,      only : pcols, pver
       use cam_history, only : outfld
-      use physics_buffer,only: physics_buffer_desc
+      use physics_buffer,only: physics_buffer_desc,pbuf_get_field
 
       implicit none
 
@@ -443,7 +436,6 @@
 !-----------------------------------------------------------------------
       integer  :: i, k
       integer  :: hemis(ncol)
-      real(r8) :: r2d
       real(r8) :: ofda, cosofa, sinofa, aslona
       real(r8) :: dlat_aur(ncol)
       real(r8) :: dlon_aur(ncol)
@@ -459,10 +451,10 @@
       real(r8) :: flux(ncol)
       real(r8) :: flux2(ncol)
       real(r8) :: drizl(ncol)
-      real(r8) :: qteaur(ncol)                         ! for electron temperature
       logical  :: do_aurora(ncol)
 
       real(r8) :: dayfrac, rotation
+      real(r8), pointer :: qteaur(:)    ! for electron temperature
 
       if (.not. aurora_active) return
 
@@ -476,16 +468,19 @@
         qnp(:,k)  = 0._r8
       end do
 
-      r2d = 180._r8/pi
-
 !-----------------------------------------------------------------------
 ! 	... output mag lons, lats
 !-----------------------------------------------------------------------
       call outfld( 'ALONM', r2d*alonm(:ncol,lchnk), pcols, lchnk )
       call outfld( 'ALATM', r2d*alatm(:ncol,lchnk), pcols, lchnk )
 
+      if (indxQTe>0) then
+        call pbuf_get_field(pbuf, indxQTe, qteaur)
+        qteaur(:) = 0._r8
+     endif
+     
 !-----------------------------------------------------------------------
-! 	... check latitudes, and return if all below 30 deg
+!    aurora is active for columns poleward of 30 deg
 !-----------------------------------------------------------------------
       do_aurora(:) = abs( rlats(:) ) > pi/6._r8
       if( all( .not. do_aurora(:) ) ) then
@@ -554,8 +549,8 @@
 ! 	... make alfa, flux, and drizzle
 !-----------------------------------------------------------------------
       call aurora_heat( flux, flux2, alfa, alfa2, &
-                        qteaur, drizl, do_aurora, hemis, &
-                        alon, colat, ncol )
+                        drizl, do_aurora, hemis, &
+                        alon, colat, ncol, pbuf )
 
 !-----------------------------------------------------------------------
 ! 	... auroral additions to ionization rates
@@ -569,7 +564,7 @@
 
       subroutine aurora_hrate( tn, mbar, rlats, &
                                aur_hrate, cpair, pmid, lchnk, calday, &
-                               ncol, rlons )
+                               ncol, rlons, pbuf  )
 !-----------------------------------------------------------------------
 ! 	... auroral parameterization driver
 !-----------------------------------------------------------------------
@@ -577,6 +572,7 @@
       use mo_apex, only : alatm, alonm                      ! magnetic latitude,longitude grid (radians)
       use mo_apex, only : maglon0
       use ppgrid,  only : pcols, pver
+      use physics_buffer,only: physics_buffer_desc
 
       implicit none
 
@@ -600,6 +596,7 @@
         rlons(ncol)
       real(r8), intent(out) :: &
         aur_hrate(ncol,pver)             ! auroral heating rate
+      type(physics_buffer_desc),pointer :: pbuf(:)
 
 !-----------------------------------------------------------------------
 ! 	... local variables
@@ -611,7 +608,6 @@
 
       integer  :: i, k
       integer  :: hemis(ncol)
-      real(r8) :: r2d
       real(r8) :: ofda, cosofa, sinofa, aslona
       real(r8) :: dlat_aur(ncol)
       real(r8) :: dlon_aur(ncol)
@@ -627,7 +623,6 @@
       real(r8) :: flux(ncol)
       real(r8) :: flux2(ncol)
       real(r8) :: drizl(ncol)
-      real(r8) :: qteaur(ncol)                         ! for electron temperature
       real(r8) :: qsum(ncol,pver)                      ! total ion production (1/s)
       logical  :: do_aurora(ncol)
 
@@ -641,8 +636,6 @@
       end do
 
       if (.not. aurora_active) return
-
-      r2d = 180._r8/pi
 
 !-----------------------------------------------------------------------
 ! 	... check latitudes, and return if all below 32.5 deg
@@ -714,9 +707,9 @@
 ! 	... make alfa, flux, and drizzle
 !-----------------------------------------------------------------------
       call aurora_heat( flux, flux2, alfa, alfa2, &
-                        qteaur, drizl, do_aurora, hemis, &
-                        alon, colat, ncol )
-
+                        drizl, do_aurora, hemis, &
+                        alon, colat, ncol, pbuf )
+ 
 !-----------------------------------------------------------------------
 ! 	... auroral additions to ionization rates
 !-----------------------------------------------------------------------
@@ -768,12 +761,13 @@
       end subroutine aurora_cusp 
 
       subroutine aurora_heat( flux, flux2, alfa, alfa2, &
-                              qteaur, drizl, do_aurora, hemis, &
-                              alon, colat, ncol )
+                              drizl, do_aurora, hemis, &
+                              alon, colat, ncol, pbuf )
 !-----------------------------------------------------------------------
 ! 	... calculate alfa, flux, and drizzle
 !-----------------------------------------------------------------------
-
+      use physics_buffer,only: physics_buffer_desc,pbuf_get_field
+      
       implicit none
 
 !-----------------------------------------------------------------------
@@ -786,10 +780,10 @@
       real(r8), intent(inout) :: flux(ncol)
       real(r8), intent(inout) :: flux2(ncol)
       real(r8), intent(inout) :: drizl(ncol)
-      real(r8), intent(inout) :: qteaur(ncol)
       real(r8), intent(inout) :: alfa(ncol)
       real(r8), intent(inout) :: alfa2(ncol)
       logical, intent(in)     :: do_aurora(ncol)
+      type(physics_buffer_desc),pointer :: pbuf(:)
 
 !-----------------------------------------------------------------------
 ! 	... local variables
@@ -799,7 +793,12 @@
         halfwidth, &                            ! oval half-width
         wrk, &                                  ! temp wrk array
         dtheta                                  ! latitudinal variation (Gaussian)
-
+      real(r8) :: ekev 
+      real(r8), pointer   :: amie_efxg(:) ! Pointer to pbuf AMIE energy flux (mW m-2)
+      real(r8), pointer   :: amie_kevg(:) ! Pointer to pbuf AMIE mean energy (keV)
+      real(r8), pointer   :: qteaur(:)    ! for electron temperature
+      integer  :: n
+      
 !-----------------------------------------------------------------------
 ! Low-energy protons:
 !
@@ -830,6 +829,7 @@
          alfa(:) =  0._r8
       end if
 
+      wrk = 0._r8
       where( do_aurora(:) )
 !-----------------------------------------------------------------------
 ! 	... flux, drizzle, alfa2, flux2
@@ -842,11 +842,32 @@
          drizl(:) = exp( -((dtheta(:) + abs(dtheta(:)))/(2._r8*h0))**2 )
          alfa2(:) = alfa20*(1._r8 - ralfa2*coslamda(:))
          flux2(:) = e20*(1._r8 - re2*coslamda(:))*wrk(:) / (2._r8*alfa2(:)*1.602e-9_r8)
+      endwhere
+
 !-----------------------------------------------------------------------
 ! 	... for electron temperature (used in settei):  
 !-----------------------------------------------------------------------
-         qteaur(:) = -7.e8_r8*wrk(:)
-      endwhere
+      if (indxQTe>0) then
+         call pbuf_get_field(pbuf, indxQTe, qteaur)
+         ! The factor of -7e8 is based on the energy per ion pair and heating efficiency from Roble (1987)
+         qteaur(:ncol) = -7.e8_r8*wrk(:ncol)
+      end if
+
+!----------------------------------------------------------------------------------------------
+!       ... If turned on, use amie energy flux and mean energy to replace flux(:) and alfa(:)
+!----------------------------------------------------------------------------------------------
+      if (amie_period .and. indxAMIEefxg>0 .and. indxAMIEkevg>0) then
+         !---------------------------------------------------------------------------
+         ! Overwrite with AMIE mean energy and energy flux in physics buffer
+         !---------------------------------------------------------------------------
+         call pbuf_get_field(pbuf, indxAMIEefxg, amie_efxg)
+         call pbuf_get_field(pbuf, indxAMIEkevg, amie_kevg)
+         do n=1,ncol
+            ekev = max(amie_kevg(n),1._r8)
+            alfa(n) = ekev/2._r8
+            flux(n) = max(amie_efxg(n)/(ekev*1.602e-9_r8),1.e-20_r8)
+         enddo
+      endif
 
       end subroutine aurora_heat
 
@@ -928,7 +949,7 @@
       real(r8) :: wrk(ncol,pver)
 
       real(r8), pointer   :: aurIPRateSum(:,:) ! Pointer to pbuf auroral ion production sum for O2+,O+,N2+ (s-1 cm-3)
-
+      
       qia(:) = 0._r8
       wrk(:,:) = 0._r8
 

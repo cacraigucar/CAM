@@ -118,12 +118,11 @@
       use shr_orb_mod,       only : shr_orb_decl
       use time_manager,      only : get_curr_calday
       use cam_control_mod,   only : lambm0, eccen, mvelpp, obliqr
-      use mo_constants,      only : r2d
+      use mo_constants,      only : r2d, n2min
       use short_lived_species,only: get_short_lived_species
       use physics_buffer,    only : physics_buffer_desc
       use phys_control,      only : waccmx_is
       use orbit,             only : zenith
-      use time_manager,      only : is_first_step
 
 !-----------------------------------------------------------------------
 !        ... dummy arguments
@@ -199,7 +198,7 @@
       real(r8), pointer :: ele_temp_fld(:,:) ! electron temperature pointer
       real(r8), pointer :: ion_temp_fld(:,:) ! ion temperature pointer
 
-      if ( ele_temp_ndx>0 .and. ion_temp_ndx>0 .and. .not.is_first_step()) then
+      if ( ele_temp_ndx>0 .and. ion_temp_ndx>0 ) then
          call pbuf_get_field(pbuf, ele_temp_ndx, ele_temp_fld)
          call pbuf_get_field(pbuf, ion_temp_ndx, ion_temp_fld)
       else
@@ -365,6 +364,9 @@ column_loop : &
             o2_line(:)  = vmr(i,:,id_o2)
             co2_line(:) = vmr(i,:,id_co2)
             n2_line(:)  = 1._r8 - (o_line(:) + o2_line(:) + vmr(i,:,id_h))
+            where( n2_line(:) < n2min ) 
+               n2_line = n2min
+            end where
             o3_line(:)  = vmr(i,:,id_o3)
             occ(:)      = o_line(:) * invariants(i,:,indexm)
             o2cc(:)     = o2_line(:) * invariants(i,:,indexm)
@@ -431,7 +433,7 @@ column_loop : &
 !-----------------------------------------------------------------------      
       call aurora( state%t, mbar, rlats, &
                    aur_hrate, cpair, state%pmid, lchnk, calday, &
-                   ncol, rlons )
+                   ncol, rlons, pbuf )
       do k = 1,pver
          aur_hrate(:,k)  = aur_hrate(:,k)/invariants(:,k,indexm)
       end do

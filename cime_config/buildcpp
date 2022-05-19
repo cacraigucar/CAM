@@ -40,6 +40,7 @@ def buildcpp(case):
     compiler = case.get_value("COMPILER") # for chem preprocessor
     nthrds_atm = case.get_value("NTHRDS_ATM")
     cam_config_opts = case.get_value("CAM_CONFIG_OPTS")
+    comp_interface=case.get_value("COMP_INTERFACE")
 
     # level information for CAM is part of the atm grid name - and must be stripped out
     nlev = ''
@@ -48,9 +49,9 @@ def buildcpp(case):
         atm_grid = match.groups()[0]
         nlev = match.groups()[1]
 
-    # The following translation is hard-wired for backwards compatibility
-    # to support the differences between how the scripts specify the land grid
-    # and how it is specified internally
+    # The following translations are hard-wired to support the differences
+    # between how the CESM scripts specify the grid and how it is specified
+    # by CAM's build and run system.
 
     if atm_grid == 'T31':
         atm_grid = '48x96'
@@ -61,9 +62,15 @@ def buildcpp(case):
     if atm_grid == 'T341':
         atm_grid = '512x1024'
 
+    # This special case for backwards compatibility.  The CESM config_grids.xml file
+    # has specifiers that CAM's configure script recognizes for all other SE grids.
+    if atm_grid == 'ne30pg3':
+        atm_grid = 'ne30np4.pg3'
+
+
     # if need to build - then construct configure command
     config_opts = ["-s", "-fc_type", compiler, "-ccsm_seq",
-                   "-dyn", cam_dycore, "-hgrid", atm_grid,
+                   "-dyn", cam_dycore, "-hgrid", atm_grid, "-cpl", comp_interface,
                    "-usr_src", os.path.join(caseroot, "SourceMods", "src.cam")]
 
     if nlev:

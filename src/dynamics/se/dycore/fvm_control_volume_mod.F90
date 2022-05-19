@@ -25,13 +25,13 @@ module fvm_control_volume_mod
 
   type, public :: fvm_struct
     ! fvm tracer mixing ratio: (kg/kg)
-    real (kind=r8) :: c(1-nhc:nc+nhc,1-nhc:nc+nhc,nlev,ntrac_d,2)
+    real (kind=r8) :: c(1-nhc:nc+nhc,1-nhc:nc+nhc,nlev,ntrac_d)
     real (kind=r8) :: se_flux(1-nhe:nc+nhe,1-nhe:nc+nhe,4,nlev) 
 
-    real (kind=r8) :: dp_fvm(1-nhc:nc+nhc,1-nhc:nc+nhc,nlev,2)
+    real (kind=r8) :: dp_fvm(1-nhc:nc+nhc,1-nhc:nc+nhc,nlev)
     real (kind=r8) :: dp_ref(nlev)
     real (kind=r8) :: dp_ref_inverse(nlev)
-    real (kind=r8) :: psc(1-nhc:nc+nhc,1-nc:nc+nhc)
+    real (kind=r8) :: psc(nc,nc)
 
     real (kind=r8) :: inv_area_sphere(nc,nc)    ! inverse area_sphere    
     real (kind=r8) :: inv_se_area_sphere(nc,nc) ! inverse area_sphere    
@@ -40,7 +40,9 @@ module fvm_control_volume_mod
     ! number of south,....,swest and 0 for interior element 
     integer                  :: cubeboundary                                                 
 
-
+#ifdef waccm_debug
+    real (kind=r8) :: CSLAM_gamma(nc,nc,nlev,4)
+#endif    
     real (kind=r8) :: displ_max(1-nhc:nc+nhc,1-nhc:nc+nhc,4)
     integer        :: flux_vec (2,1-nhc:nc+nhc,1-nhc:nc+nhc,4) 
     !
@@ -114,7 +116,7 @@ module fvm_control_volume_mod
     !          recons(4,a,b) * (carty - centroid(2,a,b))**2 + &
     !          recons(5,a,b) * (cartx - centroid(1,a,b)) * (carty - centroid(2,a,b))
     !   
-    real (kind=r8)    :: vertex_recons_weights(1:irecons_tracer-1,4,1-nhe:nc+nhe,1-nhe:nc+nhe)
+    real (kind=r8)    :: vertex_recons_weights(4,1:irecons_tracer-1,1-nhe:nc+nhe,1-nhe:nc+nhe)
     !
     ! for mapping fvm2dyn
     !
@@ -158,10 +160,7 @@ module fvm_control_volume_mod
   public :: fvm_mesh, fvm_set_cubeboundary, allocate_physgrid_vars
 
   
-  real (kind=r8),parameter, public   :: bignum = 1.0D20
-
-  integer, public            :: n0_fvm, np1_fvm !fvm time-levels
-  integer, parameter, public :: fvm_supercycling = 3
+  real (kind=r8),parameter, public   :: bignum = 1.0E20_r8
 
 contains
   subroutine fvm_set_cubeboundary(elem, fvm)
@@ -234,8 +233,8 @@ contains
     !
     ! overwrite areas for consistency with SE areas (that are O(10E-5) incorrect)
     !
-    tmp = 1.0_r8
-    call subcell_integration(tmp, np, nc, elem%metdet,fvm%area_sphere)
+!    tmp = 1.0_r8
+!    call subcell_integration(tmp, np, nc, elem%metdet,fvm%area_sphere)
     !
     ! do the same for physics grid
     !
@@ -296,7 +295,7 @@ contains
       allocate(fvm(ie)%area_sphere_physgrid(fv_nphys,fv_nphys))       
       allocate(fvm(ie)%ibase_physgrid(1-nhr_phys:fv_nphys+nhr_phys,1:nhr_phys,2))
       allocate(fvm(ie)%halo_interp_weight_physgrid(1:ns_phys,1-nhr_phys:fv_nphys+nhr_phys,1:nhr_phys,2))
-      allocate(fvm(ie)%vertex_recons_weights_physgrid(1:irecons_tracer-1,4,1-nhe_phys:fv_nphys+nhe_phys,&
+      allocate(fvm(ie)%vertex_recons_weights_physgrid(4,1:irecons_tracer-1,1-nhe_phys:fv_nphys+nhe_phys,&
             1-nhe_phys:fv_nphys+nhe_phys))
       
       allocate(fvm(ie)%norm_elem_coord_physgrid(2,1-nhc_phys:fv_nphys+nhc_phys,1-nhc_phys:fv_nphys+nhc_phys    ))

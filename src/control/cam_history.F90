@@ -54,6 +54,9 @@ module cam_history
    use sat_hist,            only: is_satfile
    use solar_parms_data,    only: solar_parms_on, kp=>solar_parms_kp, ap=>solar_parms_ap
    use solar_parms_data,    only: f107=>solar_parms_f107, f107a=>solar_parms_f107a, f107p=>solar_parms_f107p
+   use solar_wind_data,     only: solar_wind_on, byimf=>solar_wind_byimf, bzimf=>solar_wind_bzimf
+   use solar_wind_data,     only: swvel=>solar_wind_swvel, swden=>solar_wind_swden
+   use epotential_params,   only: epot_active, epot_crit_colats
 
   implicit none
   private
@@ -61,6 +64,9 @@ module cam_history
 
   ! Forward common parameters to present unified interface to cam_history
   public :: fieldname_len, horiz_only
+  public :: get_field_properties
+  public :: cam_history_snapshot_deactivate
+  public :: cam_history_snapshot_activate
 
   !
   ! master_entry: elements of an entry in the master field list
@@ -1554,6 +1560,7 @@ CONTAINS
     use sat_hist,            only: sat_hist_define, sat_hist_init
     use cam_grid_support,    only: cam_grid_read_dist_array, cam_grid_num_grids
     use cam_history_support, only: get_hist_coord_index, add_hist_coord
+    use constituents,        only: cnst_get_ind, cnst_get_type_byind
 
     use shr_sys_mod,         only: shr_sys_getenv
     use spmd_utils,          only: mpicom, mpi_character, masterprocid
@@ -1617,6 +1624,8 @@ CONTAINS
     integer                          :: fdims(3)         ! Field dims
     integer                          :: nfdims           ! 2 or 3 (for 2D,3D)
     integer                          :: fdecomp          ! Grid ID for field
+    integer                          :: idx
+    character(len=3)                 :: mixing_ratio
 
     !
     ! Get users logname and machine hostname
@@ -1834,6 +1843,15 @@ CONTAINS
         tape(t)%hlist(f)%field%decomp_type = decomp(f,t)
         tape(t)%hlist(f)%field%numlev = tmpnumlev(f,t)
         tape(t)%hlist(f)%hwrt_prec = tmpprec(f,t)
+
+        ! If the field is an advected constituent set the mixing_ratio attribute
+        fname_tmp = strip_suffix(tape(t)%hlist(f)%field%name)
+        call cnst_get_ind(fname_tmp, idx, abort=.false.)
+        mixing_ratio = ''
+        if (idx > 0) then
+           mixing_ratio = cnst_get_type_byind(idx)
+        end if
+        tape(t)%hlist(f)%field%mixing_ratio = mixing_ratio
 
         mdimcnt = count(allmdims(:,f,t) > 0)
         if(mdimcnt > 0) then
@@ -2181,7 +2199,8 @@ CONTAINS
 
     use cam_grid_support, only: cam_grid_num_grids
     use spmd_utils,       only: mpicom
-    !
+    use dycore,           only: dycore_is
+
     !-----------------------------------------------------------------------
     !
     ! Purpose: Define the contents of each history file based on namelist input for initial or branch
@@ -2195,6 +2214,7 @@ CONTAINS
     !
     integer t, f                   ! tape, field indices
     integer ff                     ! index into include, exclude and fprec list
+    integer :: i
     character(len=fieldname_len) :: name ! field name portion of fincl (i.e. no avgflag separator)
     character(len=max_fieldname_len) :: mastername ! name from masterlist field
     character(len=max_chars) :: errormsg ! error output field
@@ -2212,17 +2232,54 @@ CONTAINS
     !    on that grid.
     integer, allocatable        :: gridsontape(:,:)
 
-    !
+    ! The following list of field names are only valid for the FV dycore.  They appear
+    ! in fincl settings of WACCM use case files which are not restricted to the FV dycore.
+    ! To avoid duplicating long fincl lists in use case files to provide both FV and non-FV
+    ! versions this short list of fields is checked for and removed from fincl lists when
+    ! the dycore is not FV.
+    integer, parameter :: n_fv_only = 10
+    character(len=6) :: fv_only_flds(n_fv_only) = &
+       [ 'VTHzm ', 'WTHzm ', 'UVzm  ', 'UWzm  ', 'Uzm   ', 'Vzm   ', 'Wzm   ', &
+         'THzm  ', 'TH    ', 'MSKtem' ]
+
+    integer :: n_vec_comp, add_fincl_idx
+    integer, parameter :: nvecmax = 50 ! max number of vector components in a fincl list
+    character(len=2) :: avg_suffix
+    character(len=max_fieldname_len) :: vec_comp_names(nvecmax)
+    character(len=1)                 :: vec_comp_avgflag(nvecmax)
+    !--------------------------------------------------------------------------
+
     ! First ensure contents of fincl, fexcl, and fwrtpr are all valid names
     !
     errors_found = 0
     do t=1,ptapes
+
       f = 1
-      do while (f < pflds .and. fincl(f,t) /= ' ')
+      n_vec_comp       = 0
+      vec_comp_names   = ' '
+      vec_comp_avgflag = ' '
+fincls: do while (f < pflds .and. fincl(f,t) /= ' ')
         name = getname (fincl(f,t))
+
+        if (.not. dycore_is('FV')) then
+           ! filter out fields only provided by FV dycore
+           do i = 1, n_fv_only
+              if (name == fv_only_flds(i)) then
+                 write(errormsg,'(3a,2(i0,a))')'FLDLST: ', trim(name), &
+                    ' in fincl(', f,', ',t, ') only available with FV dycore'
+                 if (masterproc) then
+                    write(iulog,*) trim(errormsg)
+                    call shr_sys_flush(iulog)
+                 end if
+                 f = f + 1
+                 cycle fincls
+              end if
+           end do
+        end if
+
         mastername=''
         listentry => get_entry_by_name(masterlinkedlist, name)
-        if(associated(listentry)) mastername = listentry%field%name
+        if (associated(listentry)) mastername = listentry%field%name
         if (name /= mastername) then
           write(errormsg,'(3a,2(i0,a))')'FLDLST: ', trim(name), ' in fincl(', f,', ',t, ') not found'
           if (masterproc) then
@@ -2230,9 +2287,53 @@ CONTAINS
              call shr_sys_flush(iulog)
           end if
           errors_found = errors_found + 1
+        else
+           if (len_trim(mastername)>0 .and. interpolate_output(t)) then
+              if (n_vec_comp >= nvecmax) call endrun('FLDLST: need to increase nvecmax')
+              ! If this is a vector component then save the name of the complement
+              avgflag = getflag(fincl(f,t))
+              if (len_trim(listentry%meridional_field) > 0) then
+                 n_vec_comp = n_vec_comp + 1
+                 vec_comp_names(n_vec_comp) = listentry%meridional_field
+                 vec_comp_avgflag(n_vec_comp) = avgflag
+              else if (len_trim(listentry%zonal_field) > 0) then
+                 n_vec_comp = n_vec_comp + 1
+                 vec_comp_names(n_vec_comp) = listentry%zonal_field
+                 vec_comp_avgflag(n_vec_comp) = avgflag
+              end if
+           end if
         end if
         f = f + 1
-      end do
+      end do fincls
+
+      ! Interpolation of vector components requires that both be present.  If the fincl
+      ! specifier contains any vector components, then the complement was saved in the
+      ! array vec_comp_names.  Next insure (for interpolated output only) that all complements
+      ! are also present in the fincl array.
+
+      ! The first empty slot in the current fincl array is index f from loop above.
+      add_fincl_idx = f
+      if (f > 1 .and. interpolate_output(t)) then
+         do i = 1, n_vec_comp
+            call list_index(fincl(:,t), vec_comp_names(i), ff)
+            if (ff == 0) then
+
+               ! Add vector component to fincl.  Don't need to check whether its in the master
+               ! list since this was done at the time of registering the vector components.
+               avg_suffix = '  '
+               if (len_trim(vec_comp_avgflag(i)) > 0) avg_suffix = ':' // vec_comp_avgflag(i)
+               fincl(add_fincl_idx,t) = trim(vec_comp_names(i)) // avg_suffix
+               add_fincl_idx = add_fincl_idx + 1
+
+               write(errormsg,'(3a,1(i0,a))')'FLDLST: ', trim(vec_comp_names(i)), &
+                  ' added to fincl', t, '.  Both vector components are required for interpolated output.'
+               if (masterproc) then
+                  write(iulog,*) trim(errormsg)
+                  call shr_sys_flush(iulog)
+               end if
+            end if
+         end do
+      end if
 
       f = 1
       do while (f < pflds .and. fexcl(f,t) /= ' ')
@@ -3331,7 +3432,7 @@ end subroutine print_active_fldlst
 
   !#######################################################################
 
-  subroutine get_field_properties(fname, found, tape_out, ff_out)
+  subroutine get_field_properties(fname, found, tape_out, ff_out, no_tape_check_in)
 
     implicit none
     !
@@ -3353,17 +3454,26 @@ end subroutine print_active_fldlst
     logical,            intent(out) :: found ! Set to true if fname is active
     type(active_entry), pointer, optional :: tape_out(:)
     integer,            intent(out), optional :: ff_out
+    logical,            intent(in), optional  :: no_tape_check_in
 
     !
     ! Local variables
     !
     character*(max_fieldname_len) :: fname_loc  ! max-char equivalent of fname
     integer :: t, ff          ! tape, masterindex indices
+    logical :: no_tape_check
      !-----------------------------------------------------------------------
 
     ! Need to re-cast the field name so that the hashing works #hackalert
     fname_loc = fname
     ff = get_masterlist_indx(fname_loc)
+
+    ! Set the no_tape_check to false, unless is passed in
+    if (present(no_tape_check_in)) then
+       no_tape_check = no_tape_check_in
+    else
+       no_tape_check = .false.
+    end if
 
     ! Set found to .false. so we can return early if fname is not active
     found = .false.
@@ -3386,7 +3496,10 @@ end subroutine print_active_fldlst
     !  Next, check to see whether this field is active on one or more history
     !  tapes.
     !
-    if ( .not. masterlist(ff)%thisentry%act_sometape )  then
+    if (no_tape_check) then
+      if (present(ff_out)) ff_out   =  ff  ! Set the output index and return without checking tapes
+      return
+    else if ( .not. masterlist(ff)%thisentry%act_sometape )  then
       return
     end if
     !
@@ -3531,6 +3644,16 @@ end subroutine print_active_fldlst
           ierr=pio_inq_varid (tape(t)%File,'f107p   ',    tape(t)%f107pid)
           ierr=pio_inq_varid (tape(t)%File,'kp      ',    tape(t)%kpid)
           ierr=pio_inq_varid (tape(t)%File,'ap      ',    tape(t)%apid)
+        endif
+        if (solar_wind_on) then
+          ierr=pio_inq_varid (tape(t)%File,'byimf', tape(t)%byimfid)
+          ierr=pio_inq_varid (tape(t)%File,'bzimf', tape(t)%bzimfid)
+          ierr=pio_inq_varid (tape(t)%File,'swvel', tape(t)%swvelid)
+          ierr=pio_inq_varid (tape(t)%File,'swden', tape(t)%swdenid)
+        endif
+        if (epot_active) then
+          ierr=pio_inq_varid (tape(t)%File,'colat_crit1', tape(t)%colat_crit1_id)
+          ierr=pio_inq_varid (tape(t)%File,'colat_crit2', tape(t)%colat_crit2_id)
         endif
       end if
     end if
@@ -3701,6 +3824,7 @@ end subroutine print_active_fldlst
     ! Method: Issue the required netcdf wrapper calls to define the history file contents
     !
     !-----------------------------------------------------------------------
+     use phys_control,    only: phys_getopts
     use cam_grid_support, only: cam_grid_header_info_t
     use cam_grid_support, only: cam_grid_write_attr, cam_grid_write_var
     use time_manager,     only: get_step_size, get_ref_date, timemgr_get_calendar_cf
@@ -3771,6 +3895,15 @@ end subroutine print_active_fldlst
     integer                          :: amode
     logical                          :: interpolate
     logical                          :: patch_output
+    integer                          :: cam_snapshot_before_num
+    integer                          :: cam_snapshot_after_num
+    character(len=32)                :: cam_take_snapshot_before
+    character(len=32)                :: cam_take_snapshot_after
+
+    call phys_getopts(cam_take_snapshot_before_out= cam_take_snapshot_before, &
+                      cam_take_snapshot_after_out = cam_take_snapshot_after,  &
+                      cam_snapshot_before_num_out = cam_snapshot_before_num,  &
+                      cam_snapshot_after_num_out  = cam_snapshot_after_num)
 
     if(restart) then
       tape => restarthistory_tape
@@ -3839,6 +3972,16 @@ end subroutine print_active_fldlst
       call cam_pio_def_dim(tape(t)%File, 'nbnd', 2, bnddim, existOK=.true.)
       call cam_pio_def_dim(tape(t)%File, 'chars', 8, chardim)
     end if   ! is satfile
+
+    ! Store snapshot location
+    if (t == cam_snapshot_before_num) then
+       ierr=pio_put_att(tape(t)%File, PIO_GLOBAL, 'cam_snapshot_before',      &
+            trim(cam_take_snapshot_before))
+    end if
+    if (t == cam_snapshot_after_num) then
+       ierr=pio_put_att(tape(t)%File, PIO_GLOBAL, 'cam_snapshot_after',       &
+            trim(cam_take_snapshot_after))
+    end if
 
     ! Populate the history coordinate (well, mdims anyway) attributes
     ! This routine also allocates the mdimids array
@@ -4023,6 +4166,44 @@ end subroutine print_active_fldlst
           str = 'Daily planetary A geomagnetic index'
           ierr=pio_put_att (tape(t)%File, tape(t)%apid, 'long_name', trim(str))
         endif
+        if (solar_wind_on) then
+
+          ierr=pio_def_var (tape(t)%File,'byimf',pio_double,(/timdim/),tape(t)%byimfid)
+          str = 'Y component of the interplanetary magnetic field'
+          ierr=pio_put_att (tape(t)%File, tape(t)%byimfid, 'long_name', trim(str))
+          str = 'nT'
+          ierr=pio_put_att (tape(t)%File, tape(t)%byimfid, 'units', trim(str))
+
+          ierr=pio_def_var (tape(t)%File,'bzimf',pio_double,(/timdim/),tape(t)%bzimfid)
+          str = 'Z component of the interplanetary magnetic field'
+          ierr=pio_put_att (tape(t)%File, tape(t)%bzimfid, 'long_name', trim(str))
+          str = 'nT'
+          ierr=pio_put_att (tape(t)%File, tape(t)%bzimfid, 'units', trim(str))
+
+          ierr=pio_def_var (tape(t)%File,'swvel',pio_double,(/timdim/),tape(t)%swvelid)
+          str = 'Solar wind speed'
+          ierr=pio_put_att (tape(t)%File, tape(t)%swvelid, 'long_name', trim(str))
+          str = 'km/sec'
+          ierr=pio_put_att (tape(t)%File, tape(t)%swvelid, 'units', trim(str))
+
+          ierr=pio_def_var (tape(t)%File,'swden',pio_double,(/timdim/),tape(t)%swdenid)
+          str = 'Solar wind ion number density'
+          ierr=pio_put_att (tape(t)%File, tape(t)%swdenid, 'long_name', trim(str))
+          str = 'cm-3'
+          ierr=pio_put_att (tape(t)%File, tape(t)%swdenid, 'units', trim(str))
+
+        endif
+        if (epot_active) then
+          ierr=pio_def_var (tape(t)%File,'colat_crit1',pio_double,(/timdim/),tape(t)%colat_crit1_id)
+          ierr=pio_put_att (tape(t)%File, tape(t)%colat_crit1_id, 'long_name', &
+                           'First co-latitude of electro-potential critical angle')
+          ierr=pio_put_att (tape(t)%File, tape(t)%colat_crit1_id, 'units', 'degrees')
+
+          ierr=pio_def_var (tape(t)%File,'colat_crit2',pio_double,(/timdim/),tape(t)%colat_crit2_id)
+          ierr=pio_put_att (tape(t)%File, tape(t)%colat_crit2_id, 'long_name',&
+                           'Second co-latitude of electro-potential critical angle')
+          ierr=pio_put_att (tape(t)%File, tape(t)%colat_crit2_id, 'units', 'degrees')
+        endif
       end if
 
 
@@ -4188,13 +4369,20 @@ end subroutine print_active_fldlst
                'h_define: cannot define units for '//trim(fname_tmp))
         end if
 
+        str = tape(t)%hlist(f)%field%mixing_ratio
+        if (len_trim(str) > 0) then
+          ierr=pio_put_att (tape(t)%File, varid, 'mixing_ratio', trim(str))
+          call cam_pio_handle_error(ierr,                                     &
+               'h_define: cannot define mixing_ratio for '//trim(fname_tmp))
+        end if
+
         str = tape(t)%hlist(f)%field%long_name
         ierr=pio_put_att (tape(t)%File, varid, 'long_name', trim(str))
         call cam_pio_handle_error(ierr,                                       &
              'h_define: cannot define long_name for '//trim(fname_tmp))
-        !
+
         ! Assign field attributes defining valid levels and averaging info
-        !
+
         cell_methods = ''
         if (len_trim(tape(t)%hlist(f)%field%cell_methods) > 0) then
           if (len_trim(cell_methods) > 0) then
@@ -4843,7 +5031,16 @@ end subroutine print_active_fldlst
               ierr=pio_put_var (tape(t)%File, tape(t)%kpid,   (/start/), (/count1/),(/ kp /) )
               ierr=pio_put_var (tape(t)%File, tape(t)%apid,   (/start/), (/count1/),(/ ap /) )
             endif
-
+            if (solar_wind_on) then
+              ierr=pio_put_var (tape(t)%File, tape(t)%byimfid, (/start/), (/count1/),(/ byimf /) )
+              ierr=pio_put_var (tape(t)%File, tape(t)%bzimfid, (/start/), (/count1/),(/ bzimf /) )
+              ierr=pio_put_var (tape(t)%File, tape(t)%swvelid, (/start/), (/count1/),(/ swvel /) )
+              ierr=pio_put_var (tape(t)%File, tape(t)%swdenid, (/start/), (/count1/),(/ swden /) )
+            endif
+            if (epot_active) then
+              ierr=pio_put_var (tape(t)%File, tape(t)%colat_crit1_id, (/start/), (/count1/),(/ epot_crit_colats(1) /) )
+              ierr=pio_put_var (tape(t)%File, tape(t)%colat_crit2_id, (/start/), (/count1/),(/ epot_crit_colats(2) /) )
+            endif
           end if
 
           ierr = pio_put_var (tape(t)%File, tape(t)%datesecid,(/start/),(/count1/),(/ncsec/))
@@ -4991,6 +5188,7 @@ end subroutine print_active_fldlst
     use cam_history_support, only: fillvalue, hist_coord_find_levels
     use cam_grid_support,    only: cam_grid_id, cam_grid_is_zonal
     use cam_grid_support,    only: cam_grid_get_coord_names
+    use constituents,        only: pcnst, cnst_get_ind, cnst_get_type_byind
 
     !
     ! Arguments
@@ -5015,9 +5213,11 @@ end subroutine print_active_fldlst
     character(len=max_fieldname_len) :: fname_tmp ! local copy of fname
     character(len=max_fieldname_len) :: coord_name ! for cell_methods
     character(len=128)               :: errormsg
+    character(len=3)                 :: mixing_ratio
     type(master_entry), pointer      :: listentry
 
     integer :: dimcnt
+    integer :: idx
 
     if (htapes_defined) then
       call endrun ('ADDFLD: Attempt to add field '//trim(fname)//' after history files set')
@@ -5050,14 +5250,22 @@ end subroutine print_active_fldlst
       call endrun ('ADDFLD:  '//fname//' already on list')
     end if
 
-    !
+    ! If the field is an advected constituent determine whether its concentration
+    ! is based on dry or wet air.
+    call cnst_get_ind(fname_tmp, idx, abort=.false.)
+    mixing_ratio = ''
+    if (idx > 0) then
+       mixing_ratio = cnst_get_type_byind(idx)
+    end if
+
     ! Add field to Master Field List arrays fieldn and iflds
     !
     allocate(listentry)
-    listentry%field%name        = fname
-    listentry%field%long_name   = long_name
-    listentry%field%numlev      = 1        ! Will change if lev or ilev in shape
-    listentry%field%units       = units
+    listentry%field%name         = fname
+    listentry%field%long_name    = long_name
+    listentry%field%numlev       = 1        ! Will change if lev or ilev in shape
+    listentry%field%units        = units
+    listentry%field%mixing_ratio = mixing_ratio
     listentry%field%meridional_complement = -1
     listentry%field%zonal_complement      = -1
     listentry%htapeindx(:) = -1
@@ -5859,5 +6067,34 @@ end subroutine print_active_fldlst
     end do ! history files
 
   end function hist_fld_col_active
+
+  subroutine cam_history_snapshot_deactivate(name)
+
+  ! This subroutine deactivates (sets actflag to false) for all tapes
+
+  character(len=*), intent(in) :: name
+
+  logical :: found
+  integer :: ff
+
+  call get_field_properties(trim(name), found, ff_out=ff, no_tape_check_in=.true.)
+  masterlist(ff)%thisentry%actflag(:) = .false.
+
+  end subroutine cam_history_snapshot_deactivate
+
+  subroutine cam_history_snapshot_activate(name, tape)
+
+  ! This subroutine activates (set aftflag to true) for the requested tape number
+
+  character(len=*), intent(in) :: name
+  integer,          intent(in) :: tape
+
+  logical :: found
+  integer :: ff
+
+  call get_field_properties(trim(name), found, ff_out=ff, no_tape_check_in=.true.)
+  masterlist(ff)%thisentry%actflag(tape) = .true.
+
+  end subroutine cam_history_snapshot_activate
 
 end module cam_history

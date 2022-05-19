@@ -38,7 +38,13 @@ real(r8), public, parameter :: karman      = shr_const_karman     ! Von Karman c
 real(r8), public, parameter :: latice      = shr_const_latice     ! Latent heat of fusion (J/kg)
 real(r8), public, parameter :: latvap      = shr_const_latvap     ! Latent heat of vaporization (J/kg)
 real(r8), public, parameter :: pi          = shr_const_pi         ! 3.14...
+#ifdef planet_mars
+real(r8), public, parameter :: pstd        = 6.0E1_r8             ! Standard pressure (Pascals)
+#else
 real(r8), public, parameter :: pstd        = shr_const_pstd       ! Standard pressure (Pascals)
+real(r8), public, parameter :: tref        = 288._r8              ! Reference temperature
+real(r8), public, parameter :: lapse_rate  = 0.0065_r8            ! reference lapse rate [K/m]
+#endif
 real(r8), public, parameter :: r_universal = shr_const_rgas       ! Universal gas constant (J/K/kmol)
 real(r8), public, parameter :: rhoh2o      = shr_const_rhofw      ! Density of liquid water (STP)
 real(r8), public, parameter :: spval       = shr_const_spval      !special value
@@ -117,10 +123,12 @@ subroutine physconst_readnl(nlfile)
    ! Local variables
    integer :: unitn, ierr
    character(len=*), parameter :: subname = 'physconst_readnl'
-   logical :: newg, newsday, newmwh2o, newcpwv, newmwdry, newcpair, newrearth, newtmelt
+   logical :: newg, newsday, newmwh2o, newcpwv, newmwdry, newcpair, newrearth, newtmelt, newomega
+
 
    ! Physical constants needing to be reset (ie. for aqua planet experiments)
-   namelist /physconst_nl/  gravit, sday, mwh2o, cpwv, mwdry, cpair, rearth, tmelt
+   namelist /physconst_nl/  gravit, sday, mwh2o, cpwv, mwdry, cpair, rearth, tmelt, omega
+
    !-----------------------------------------------------------------------------
 
    if (masterproc) then
@@ -147,6 +155,8 @@ subroutine physconst_readnl(nlfile)
    call mpibcast(cpair,       1,  mpir8,   0, mpicom)
    call mpibcast(rearth,      1,  mpir8,   0, mpicom)
    call mpibcast(tmelt,       1,  mpir8,   0, mpicom)
+   call mpibcast(omega,       1,  mpir8,   0, mpicom)
+
 #endif
 
    newg     =  gravit .ne. shr_const_g
@@ -157,8 +167,11 @@ subroutine physconst_readnl(nlfile)
    newcpair =  cpair  .ne. shr_const_cpdair
    newrearth=  rearth .ne. shr_const_rearth
    newtmelt =  tmelt  .ne. shr_const_tkfrz
+   newomega =  omega  .ne. shr_const_omega
 
-   if (newg .or. newsday .or. newmwh2o .or. newcpwv .or. newmwdry .or. newrearth .or. newtmelt) then
+
+
+   if (newg .or. newsday .or. newmwh2o .or. newcpwv .or. newmwdry .or. newrearth .or. newtmelt .or. newomega) then
       if (masterproc) then
          write(iulog,*)'****************************************************************************'
          write(iulog,*)'***    New Physical Constant Values set via namelist                     ***'
@@ -172,11 +185,14 @@ subroutine physconst_readnl(nlfile)
          if (newcpair)   write(iulog,*)'***       CPAIR     ',shr_const_cpdair,cpair,'***'
          if (newrearth)  write(iulog,*)'***       REARTH    ',shr_const_rearth,rearth,'***'
          if (newtmelt)   write(iulog,*)'***       TMELT     ',shr_const_tkfrz,tmelt,'***'
+         if (newomega)   write(iulog,*)'***       OMEGA     ',shr_const_omega,omega,'***'
          write(iulog,*)'****************************************************************************'
       end if
       rga         = 1._r8/gravit
       ra          = 1._r8/rearth
-      omega       = 2.0_R8*pi/sday
+      if (.not. newomega) then
+         omega       = 2.0_r8*pi/sday
+      end if
       cpvir       = cpwv/cpair - 1._r8
       epsilo      = mwh2o/mwdry
 
@@ -254,7 +270,7 @@ end subroutine physconst_init
 
 !===============================================================================
 
-  subroutine physconst_update(mmr, t, lchnk, ncol)
+  subroutine physconst_update(mmr, t, lchnk, ncol, to_moist_factor)
 
 !-----------------------------------------------------------------------
 ! Update the physics "constants" that vary
@@ -266,6 +282,7 @@ end subroutine physconst_init
     real(r8), intent(in) :: t(pcols,pver)   ! temperature t array from state structure
     integer, intent(in)  :: lchnk           ! Chunk number
     integer, intent(in)  :: ncol            ! number of columns
+    real(r8),  optional, intent(in) :: to_moist_factor(:,:)
 !
 !---------------------------Local storage-------------------------------------------------------------
     integer :: i,k                                 ! column,level,constituent indices
@@ -275,6 +292,8 @@ end subroutine physconst_init
     real(r8):: dof1, dof2                          ! Degress of freedom for cpairv calculation
     real(r8):: kv1, kv2, kv3, kv4                  ! Coefficients for kmvis calculation
     real(r8):: kc1, kc2, kc3, kc4                  ! Coefficients for kmcnd calculation
+    real(r8) :: to_moist_fact(ncol,pver)
+    
     !--------------------------------------------
     ! Set constants needed for updates
     !--------------------------------------------
@@ -289,6 +308,12 @@ end subroutine physconst_init
     kc3  = 75.9_r8
     kc4  = 0.69_r8
 
+    to_moist_fact(:,:) = 1._r8
+
+    if (present(to_moist_factor)) then
+       to_moist_fact(:ncol,:) = to_moist_factor(:ncol,:)
+    end if
+
     if (o2_ndx<0 .or. o_ndx<0 .or. h_ndx<0) then
        call endrun('physconst_update: ERROR -- needed constituents are not available')
     endif
@@ -298,9 +323,9 @@ end subroutine physconst_init
      !--------------------------------------------
      do k=1,pver
         do i=1,ncol
-           mmro = mmr(i,k, o_ndx)
-           mmro2 = mmr(i,k, o2_ndx)
-           mmrh = mmr(i,k, h_ndx)
+           mmro  = mmr(i,k,o_ndx)*to_moist_fact(i,k) ! convert to moist mass mixing ratios
+           mmro2 = mmr(i,k,o2_ndx)*to_moist_fact(i,k)
+           mmrh  = mmr(i,k,h_ndx)*to_moist_fact(i,k)
            mmrn2 = 1._r8-mmro-mmro2-mmrh
            mbarv(i,k,lchnk) = 1._r8/( mmro *o_mwi  + &
                                       mmro2*o2_mwi + &
@@ -319,9 +344,10 @@ end subroutine physconst_init
 
      do k=2,pver
         do i=1,ncol
-           mmro = .5_r8*(mmr(i,k-1, o_ndx)+mmr(i,k,o_ndx))
-           mmro2 = .5_r8*(mmr(i,k-1, o2_ndx)+mmr(i,k,o2_ndx))
-           mmrn2 = 1._r8-mmro-mmro2
+           mmro  = .5_r8*(mmr(i,k-1,o_ndx) *to_moist_fact(i,k-1)+mmr(i,k,o_ndx) *to_moist_fact(i,k))
+           mmro2 = .5_r8*(mmr(i,k-1,o2_ndx)*to_moist_fact(i,k-1)+mmr(i,k,o2_ndx)*to_moist_fact(i,k))
+           mmrh  = .5_r8*(mmr(i,k-1,h_ndx) *to_moist_fact(i,k-1)+mmr(i,k,h_ndx) *to_moist_fact(i,k))
+           mmrn2 = 1._r8-mmro-mmro2-mmrh
            mbarvi = .5_r8*(mbarv(i,k-1,lchnk)+mbarv(i,k,lchnk))
            tint = .5_r8*(t(i,k-1)+t(i,k))
 
@@ -347,7 +373,8 @@ end subroutine physconst_init
 !===============================================================================
 
    subroutine physconst_calc_kappav( i0,i1,j0,j1,k0,k1,ntotq, tracer, kappav, cpv )
-
+     ! assumes moist MMRs
+     
      ! args
      integer,  intent(in) :: i0,i1,j0,j1,k0,k1, ntotq
      real(r8), intent(in) :: tracer(i0:i1,j0:j1,k0:k1,ntotq) ! Tracer array

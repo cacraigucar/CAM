@@ -7,7 +7,7 @@ module chemistry
   use shr_kind_mod,     only : r8 => shr_kind_r8, shr_kind_cl
   use ppgrid,           only : pcols, pver, begchunk, endchunk
   use physconst,        only : gravit
-  use constituents,     only : pcnst, cnst_add, cnst_name, cnst_fixed_ubc, cnst_type
+  use constituents,     only : pcnst, cnst_add, cnst_name, cnst_fixed_ubc
   use chem_mods,        only : gas_pcnst
   use cam_history,      only : fieldname_len
   use physics_types,    only : physics_state, physics_ptend, physics_ptend_init
@@ -15,6 +15,7 @@ module chemistry
   use cam_logfile,      only : iulog
   use mo_gas_phase_chemdr, only : map2chm
   use shr_megan_mod,    only : shr_megan_mechcomps, shr_megan_mechcomps_n 
+  use srf_field_check,  only : active_Fall_flxvoc
   use tracer_data,      only : MAXTRCRS
   use gcr_ionization,   only : gcr_ionization_readnl, gcr_ionization_init, gcr_ionization_adv
   use epp_ionization,   only : epp_ionization_readnl, epp_ionization_adv
@@ -768,7 +769,8 @@ end function chem_is_active
     use constituents,          only : sflxnam
     use noy_ubc,             only : noy_ubc_init
     use fire_emissions,      only : fire_emissions_init
-
+    use short_lived_species, only : short_lived_species_initic
+    
     type(physics_buffer_desc), pointer :: pbuf2d(:,:)
     type(physics_state), intent(in):: phys_state(begchunk:endchunk)
 
@@ -851,12 +853,6 @@ end function chem_is_active
              endif
           endif
   
-          ! this is moved out of chem_register because we need to know where (what pressure) 
-          ! the upper boundary is to determine if this is a high top configuration -- after
-          ! initialization of ref_pres ...
-          if ( do_molec_diff ) then ! molecular diffusion requires 'wet' mixing ratios
-             cnst_type(n) = 'wet'
-          endif
        endif
     end do
 
@@ -966,6 +962,8 @@ end function chem_is_active
      ! Fire emissions ...
      call fire_emissions_init()
 
+     call short_lived_species_initic()
+     
   end subroutine chem_init
 
 !================================================================================
@@ -976,7 +974,6 @@ end function chem_is_active
     use constituents,     only: sflxnam
     use cam_history,      only: outfld
     use mo_srf_emissions, only: set_srf_emissions
-    use cam_cpl_indices,  only: index_x2a_Fall_flxvoc
     use fire_emissions,   only: fire_emissions_srf
 
     ! Arguments:
@@ -1006,7 +1003,7 @@ end function chem_is_active
 
    ! MEGAN emissions ...
  
-    if ( index_x2a_Fall_flxvoc>0 .and. shr_megan_mechcomps_n>0 ) then
+    if ( active_Fall_flxvoc .and. shr_megan_mechcomps_n>0 ) then
 
        ! set MEGAN fluxes 
        do n = 1,shr_megan_mechcomps_n
@@ -1259,6 +1256,7 @@ end function chem_is_active
     use mo_drydep,           only : drydep_update
     use mo_neu_wetdep,       only : neu_wetdep_tend
     use aerodep_flx,         only : aerodep_flx_prescribed
+    use short_lived_species, only : short_lived_species_writeic
     
     implicit none
 
@@ -1309,6 +1307,8 @@ end function chem_is_active
     lchnk = state%lchnk
     ncol  = state%ncol
 
+    call short_lived_species_writeic( lchnk, pbuf )
+
     lq(:) = .false.
     do n = 1,pcnst
        m = map2chm(n)
@@ -1330,17 +1330,12 @@ end function chem_is_active
 !-----------------------------------------------------------------------
 ! get tropopause level
 !-----------------------------------------------------------------------
-    if (chem_is('super_fast_llnl') .or. chem_is('super_fast_llnl_mam3')) then
-       call tropopause_find(state, tropLev, primary=TROP_ALG_HYBSTOB, backup=TROP_ALG_CLIMATE)
+    if (.not.chem_use_chemtrop) then
+       call tropopause_find(state,tropLev)
        tropLevChem=tropLev
     else
-       if (.not.chem_use_chemtrop) then
-          call tropopause_find(state,tropLev)
-          tropLevChem=tropLev
-       else
-          call tropopause_find(state,tropLev)
-          call tropopause_findChemTrop(state, tropLevChem)
-       endif
+       call tropopause_find(state,tropLev)
+       call tropopause_findChemTrop(state, tropLevChem)
     endif
 
     tim_ndx = pbuf_old_tim_idx()
@@ -1442,6 +1437,7 @@ end function chem_is_active
     do k = 1,pver
        fh2o(:ncol) = fh2o(:ncol) + ptend%q(:ncol,k,1)*state%pdel(:ncol,k)/gravit
     end do
+    
   end subroutine chem_timestep_tend
 
 !-------------------------------------------------------------------

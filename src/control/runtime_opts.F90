@@ -58,6 +58,7 @@ subroutine read_namelist(nlfilename, single_column, scmlat, scmlon)
    use gw_drag,             only: gw_drag_readnl
    use qbo,                 only: qbo_readnl
    use iondrag,             only: iondrag_readnl
+   use waccmx_phys_intr,    only: waccmx_phys_ion_elec_temp_readnl
    use phys_debug_util,     only: phys_debug_readnl
    use conv_water,          only: conv_water_readnl
    use rad_constituents,    only: rad_cnst_readnl
@@ -88,10 +89,12 @@ subroutine read_namelist(nlfilename, single_column, scmlat, scmlon)
    use inic_analytic_utils, only: analytic_ic_readnl
    use rate_diags,          only: rate_diags_readnl
    use tracers,             only: tracers_readnl
+   use nudging,             only: nudging_readnl
 
    use dyn_comp,            only: dyn_readnl
    use ionosphere_interface,only: ionosphere_readnl
    use qneg_module,         only: qneg_readnl
+   use lunar_tides,         only: lunar_tides_readnl
 
    !---------------------------Arguments-----------------------------------
 
@@ -147,7 +150,9 @@ subroutine read_namelist(nlfilename, single_column, scmlat, scmlon)
    call cld_sediment_readnl(nlfilename)
    call gw_drag_readnl(nlfilename)
    call qbo_readnl(nlfilename)
+   call lunar_tides_readnl(nlfilename)
    call iondrag_readnl(nlfilename)
+   call waccmx_phys_ion_elec_temp_readnl(nlfilename)
    call phys_debug_readnl(nlfilename)
    call conv_water_readnl(nlfilename)
    call radiation_readnl(nlfilename)
@@ -181,6 +186,7 @@ subroutine read_namelist(nlfilename, single_column, scmlat, scmlon)
    call analytic_ic_readnl(nlfilename)
    call rate_diags_readnl(nlfilename)
    call scam_readnl(nlfilename, single_column, scmlat, scmlon)
+   call nudging_readnl(nlfilename)
 
    call dyn_readnl(nlfilename)
    call ionosphere_readnl(nlfilename)

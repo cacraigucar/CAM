@@ -1420,17 +1420,15 @@ implicit none
 ! (i.e. the mwair is correct), but vco2 will be limited.  Abort the run if CO2
 ! exceeds the limit at altitudes above 1 mbar unless apply_co2_limit=.true.
 
-            if (vco2(i,k)>co2_limit) then
+            if ((vco2(i,k)>co2_limit).and.(.not.apply_co2_limit).and.(kinv<k1mb)) then
                nstep = get_nstep()
                latdeg = get_rlat_p(lchnk,i)*180._r8/pi
                londeg = get_rlon_p(lchnk,i)*180._r8/pi
                write(errmsg,fmt='(a,i12,2(i6),g12.4,2(f8.2),g12.4)') &
-                     'nlte_fomichev_calc: CO2 has exceeded the limit: nstep,i,k,press(Pa),lon,lat,vco2(vmr)=',&
-                                     nstep,i,kinv, pmid(i,kinv), londeg, latdeg, vco2(i,k)
+                    'nlte_fomichev_calc: CO2 has exceeded the limit: nstep,i,k,press(Pa),lon,lat,vco2(vmr)=',&
+                    nstep,i,kinv, pmid(i,kinv), londeg, latdeg, vco2(i,k)
                write(iulog,*) trim(errmsg)
-               if ((.not.apply_co2_limit) .and. (kinv<k1mb)) then
-                   call endrun(trim(errmsg))
-               endif
+               call endrun(trim(errmsg))
             endif
 
 !-----------------------------------------------------------------
@@ -2449,8 +2447,10 @@ real(r8) function a18lin (x,xn,yn,m,n)
      real(r8) :: no_conc                          ! NO concentration divided by mean air density
      real(r8) :: no_deact                         ! effective NO deactivation rate multiplied by air concentration
 
-     real(r8), parameter :: o1_rate = 2.7e-11_r8     ! O1 reaction rate (units????)
-     real(r8), parameter :: o2_rate = 2.4e-14_r8     ! O2 reaction rate (units????)
+     ! Hwang et al., "Vibrational relaxation of NO(v=1) by oxygen atoms between 295 and 825 K"
+     ! JGR, Vol. 108, No. A3, 1109, doi:10.1029/2002JA009688, 2003
+     real(r8), parameter :: o1_rate = 4.2e-11_r8     ! O1 reaction rate (cm3/sec)
+     real(r8), parameter :: o2_rate = 2.4e-14_r8     ! O2 reaction rate (cm3/sec)
      real(r8), parameter :: phot_e  = 3.726e-13_r8   ! photon energy at 5.3 mum (erg)
      real(r8), parameter :: trans_prob = 13.3_r8     ! Einstein transition probability
 

@@ -5,7 +5,7 @@
 <start_ymd>20000101</start_ymd>
 
 <!--Species IC -->
-<ncdata dyn="fv"  hgrid="1.9x2.5" >atm/waccm/ic/f.c54137.FXSD.f19_f19.001.cam.i.2000-01-01-00000_c170817.nc</ncdata>
+<ncdata dyn="fv"  hgrid="1.9x2.5" >atm/waccm/ic/f.e21.machem01_cam6_0_024.FXSD.spinup.03.cam.i.2000-01-01-00000_c181017.nc</ncdata>
 
 <lght_no_prd_factor>1.0</lght_no_prd_factor>
 
@@ -33,7 +33,7 @@
 <flbc_type>'SERIAL'</flbc_type>
 <flbc_list>
  'CCL4', 'CF2CLBR', 'CF3BR', 'CFC11', 'CFC113', 'CFC12', 'CH3BR', 'CH3CCL3', 'CH3CL', 'CH4', 'CO2', 'H2',
- 'HCFC22', 'N2O', 'CFC114', 'CFC115', 'HCFC141B', 'HCFC142B', 'CH2BR2', 'CHBR3', 'H1202', 'H2402','SF6'
+ 'HCFC22', 'N2O', 'CFC114', 'CFC115', 'HCFC141B', 'HCFC142B', 'CH2BR2', 'CHBR3', 'H2402','SF6'
 </flbc_list>
 
 <!-- Tropospheric Aerosols -->
@@ -69,7 +69,6 @@
 <srf_emis_type>'INTERP_MISSING_MONTHS'</srf_emis_type>
 
 <!-- turn on clm MEGAN VOC emis -->
-<megan_factors_file>atm/cam/chem/trop_mozart/emis/megan21_emis_factors_c20120313.nc</megan_factors_file>
 <megan_mapped_emisfctrs>.false.</megan_mapped_emisfctrs>
 <megan_specifier>
  'CH2O = formaldehyde',
@@ -86,7 +85,7 @@
          'Z3', 'T', 'TIon', 'TElec', 'e', 'U', 'V', 'OMEGA', 'UI', 'VI', 'WI', 'ElecColDens', 'PHIM2D', 'PS', 
          'EDYN_ZIGM11_PED', 'EDYN_ZIGM2_HAL', 'ED1', 'ED2' 'O', 'O2', 'H', 'NO', 'CO2', 'N', 'O1D', 'Op2P', 'Op2D', 'Op', 
 	 'Np', 'N2p', 'O2p', 'NOp', 'QJOULE', 'SIGMAHAL', 'SIGMAPED', 'SolIonRate_Tot', 'QRS_TOT', 'QO3', 'QCO2', 
-	 'QNO', 'QO3P', 'QHC2S', 'QJOULE', 'QEN', 'QIN', 'QEI', 'EKGW', 'TTGW', 'UTGW_TOTAL',
+	 'QNO', 'QO3P', 'QHC2S', 'QJOULE', 'EKGW', 'TTGW', 'UTGW_TOTAL',
          'T_24_COS', 'T_24_SIN', 'T_12_COS', 'T_12_SIN', 'T_08_COS', 'T_08_SIN',
 	 'U_24_COS', 'U_24_SIN', 'U_12_COS', 'U_12_SIN', 'U_08_COS', 'U_08_SIN',
 	 'V_24_COS', 'V_24_SIN', 'V_12_COS', 'V_12_SIN', 'V_08_COS', 'V_08_SIN',
@@ -122,7 +121,7 @@
 <fincl4>  
          'Z3', 'T', 'TIon', 'TElec', 'e', 'U', 'V', 'OMEGA', 'UI', 'VI', 'WI', 'ElecColDens', 'PHIM2D', 'PS', 
          'EDYN_ZIGM11_PED', 'EDYN_ZIGM2_HAL', 'ED1', 'ED2', 'O', 'O2', 'H', 'NO', 'CO2', 'N', 'QRS_TOT', 
-	 'QO3', 'QCO2', 'QNO', 'QO3P', 'QHC2S', 'QJOULE', 'QEN', 'QIN', 'QEI', 'EKGW', 'TTGW', 'UTGW_TOTAL', 
+	 'QO3', 'QCO2', 'QNO', 'QO3P', 'QHC2S', 'QJOULE', 'EKGW', 'TTGW', 'UTGW_TOTAL', 
 	 'SolIonRate_Tot', 'Z3GM', 'OpDens', 'EDens'
 </fincl4>
 <!-- Average every 5 days --> 
@@ -142,9 +141,10 @@
 <met_rlx_top>55.</met_rlx_top>
 <met_rlx_time>50.</met_rlx_time>
 <met_fix_mass>.true.</met_fix_mass>
-<met_data_file>'2000/MERRA_19x2_20000101.nc'</met_data_file>
-<met_data_path>atm/cam/met/MERRA</met_data_path>
-<met_filenames_list>atm/cam/met/MERRA/CCMI_sd_filenames.txt</met_filenames_list>
+<met_data_file>2000/MERRA2_1.9x2.5_20000101.nc</met_data_file>
+<met_data_path>atm/cam/met/MERRA2/1.9x2.5</met_data_path>
+<met_filenames_list>atm/cam/met/MERRA2/1.9x2.5/filenames_list_c180824</met_filenames_list>
+<bnd_topo hgrid="1.9x2.5">atm/cam/met/MERRA2/1.9x2.5/USGS-gtopo30_1.9x2.5_remap_MERRA2_c180824.nc</bnd_topo>
 
 <fv_div24del2flag>42</fv_div24del2flag>
 
@@ -176,7 +176,6 @@
 <iradsw>-1</iradsw>
 <phys_loadbalance>2</phys_loadbalance>
 <soil_erod_file>atm/cam/dst/dst_source2x2tuned-cam4-06132012.nc</soil_erod_file>
-<bnd_topo hgrid="1.9x2.5">atm/cam/topo/USGS-gtopo30_1.9x2.5_remap_c050602.nc</bnd_topo>
 <rk_strat_polstrat_rhmin>1.200D0</rk_strat_polstrat_rhmin>
 <history_clubb>.false.</history_clubb> 
 

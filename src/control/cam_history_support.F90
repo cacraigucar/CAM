@@ -121,6 +121,7 @@ module cam_history_support
     character(len=max_fieldname_len) :: name ! field name
     character(len=max_chars) :: long_name    ! long name
     character(len=max_chars) :: units        ! units
+    character(len=3)         :: mixing_ratio ! 'dry' or 'wet'
     character(len=max_chars) :: sampling_seq ! sampling sequence - if not every timestep, how often field is sampled
     ! (i.e., how often "outfld" is called):  every other; only during LW/SW
     ! radiation calcs; etc.
@@ -212,6 +213,12 @@ module cam_history_support
     type(var_desc_t) :: f107pid          ! var id for f107p
     type(var_desc_t) :: kpid             ! var id for kp
     type(var_desc_t) :: apid             ! var id for ap
+    type(var_desc_t) :: byimfid          ! var id IMF BY
+    type(var_desc_t) :: bzimfid          ! var id IMF BZ
+    type(var_desc_t) :: swvelid          ! var id solar wind velocity
+    type(var_desc_t) :: swdenid          ! var id solar wind density
+    type(var_desc_t) :: colat_crit1_id   ! critical colatitude
+    type(var_desc_t) :: colat_crit2_id   ! critical colatitude
 
   end type active_entry
 
@@ -301,6 +308,7 @@ module cam_history_support
   public     :: lookup_hist_coord_indices, hist_coord_find_levels
   public     :: get_hist_coord_index, hist_coord_name, hist_coord_size
   public     :: sec2hms, date2yyyymmdd
+  public     :: hist_dimension_name
 
   interface add_hist_coord
     module procedure add_hist_coord_regonly
@@ -1983,5 +1991,25 @@ contains
 
   !#######################################################################
 
+  character(len=max_hcoordname_len) function hist_dimension_name (size)
+  ! Given a specific size value, return the first registered dimension name which matches the size, if it exists
+  ! Otherwise the name returned is blank
+
+     integer, intent(in) :: size
+  
+     integer :: i
+     
+     hist_dimension_name = ''
+     
+     do i=1, registeredmdims
+        if(size == hist_coords(i)%dimsize) then
+           hist_dimension_name = hist_coords(i)%name
+           exit
+        end if
+     end do    
+     
+  end function hist_dimension_name
+
+  !#######################################################################
 
 end module cam_history_support

@@ -270,7 +270,7 @@ CONTAINS
     allocate (v3(ifirstxy:ilastxy, km, jfirstxy:jlastxy))
 
     if (iam .lt. grid%npes_xy) then
-       call d2a3dikj(grid, dyn_state%am_correction, u3sxy,  v3sxy, u3, v3)
+       call d2a3dikj(grid, dyn_state%am_geom_crrct, u3sxy,  v3sxy, u3, v3)
     end if  ! (iam .lt. grid%npes_xy)
 
     call t_stopf  ('d2a3dikj')
@@ -303,9 +303,9 @@ CONTAINS
 
        if (iam .lt. grid%npes_xy) then
              ! (note dummy use of dva3 hence call order matters)
-          call d2a3dikj(grid, dyn_state%am_correction,duf3sxy,   dummy, duf3 ,dva3)
-          call d2a3dikj(grid, dyn_state%am_correction,dua3sxy, dva3sxy, dua3, dva3)
-          call d2a3dikj(grid, dyn_state%am_correction, du3sxy,  dv3sxy, du3 , dv3 )
+          call d2a3dikj(grid, dyn_state%am_geom_crrct,duf3sxy,   dummy, duf3 ,dva3)
+          call d2a3dikj(grid, dyn_state%am_geom_crrct,dua3sxy, dva3sxy, dua3, dva3)
+          call d2a3dikj(grid, dyn_state%am_geom_crrct, du3sxy,  dv3sxy, du3 , dv3 )
        end if  ! (iam .lt. grid%npes_xy)
 
        call t_startf('DP_CPLN_fv_am')
@@ -313,7 +313,7 @@ CONTAINS
        call t_stopf('DP_CPLN_fv_am')
     endif
 
-    if (use_gw_front .or. use_gw_front_igw) then
+    if ((iam .lt. grid%npes_xy) .and. (use_gw_front .or. use_gw_front_igw)) then
        call t_startf('DP_CPLN_gw_sources')
        call gws_src_fnct(grid, u3, v3, ptxy, tracer(:,jfirstxy:jlastxy,:,1), pexy, frontgf, frontga)
        call t_stopf('DP_CPLN_gw_sources')
@@ -949,7 +949,7 @@ chnk_loop2 : &
        call t_startf('uv3s_update')
        if (iam .lt. grid%npes_xy) then
           call uv3s_update(grid, dudtxy, u3sxy, dvdtxy, v3sxy, dt5, &
-                           dyn_state%am_correction)
+                           dyn_state%am_geom_crrct)
        end if  ! (iam .lt. grid%npes_xy)
        call t_stopf('uv3s_update')
 

@@ -27,7 +27,7 @@ use perf_mod,       only: t_startf, t_stopf, t_barrierf
 use cam_abortutils, only: endrun
 
 use parallel_mod,   only: par
-use thread_mod,     only: horz_num_threads
+use thread_mod,     only: horz_num_threads, max_num_threads
 use hybrid_mod,     only: config_thread_region, get_loop_ranges, hybrid_t
 use dimensions_mod, only: np, npsq, nelemd, nlev, nc, qsize, ntrac, fv_nphys
 
@@ -49,11 +49,14 @@ CONTAINS
 
 subroutine d_p_coupling(phys_state, phys_tend,  pbuf2d, dyn_out)
 
+   ! Convert the dynamics output state into the physics input state.
+   ! Note that all pressures and tracer mixing ratios coming from the dycore are based on
+   ! dry air mass.
+
    use gravity_waves_sources,  only: gws_src_fnct
    use dyn_comp,               only: frontgf_idx, frontga_idx
    use phys_control,           only: use_gw_front, use_gw_front_igw
    use hycoef,                 only: hyai, ps0
-   use fvm_control_volume_mod, only: n0_fvm
    use fvm_mapping,            only: dyn2phys_vector, dyn2phys_all_vars
    use time_mod,               only: timelevel_qdp
    use control_mod,            only: qsplit
@@ -137,35 +140,25 @@ subroutine d_p_coupling(phys_state, phys_tend,  pbuf2d, dyn_out)
    end if
 
    if (iam < par%nprocs) then
-
       if (use_gw_front .or. use_gw_front_igw) then
          call gws_src_fnct(elem, tl_f, tl_qdp_np0, frontgf, frontga, nphys)
       end if
 
       if (fv_nphys > 0) then
-         call test_mapping_overwrite_dyn_state(elem,dyn_out%fvm,tl_f)
+         call test_mapping_overwrite_dyn_state(elem,dyn_out%fvm)
          !******************************************************************
          ! physics runs on an FVM grid: map GLL vars to physics grid
          !******************************************************************
          call t_startf('dyn2phys')
+         ! note that the fvm halo has been filled in prim_run_subcycle
+         ! if physics grid resolution is not equal to fvm resolution
+         call dyn2phys_all_vars(1,nelemd,elem, dyn_out%fvm,&
+              pcnst,hyai(1)*ps0,tl_f,                      &
+              ! output
+              dp3d_tmp, ps_tmp, q_tmp, T_tmp,              &
+              omega_tmp, phis_tmp                          &
+              )
          do ie = 1, nelemd
-            ! note that the fvm halo has been filled in prim_run_subcycle
-            ! if physics grid resolution is not equal to fvm resolution
-            call dyn2phys_all_vars(ie,                                         &
-               ! spectral element state
-               elem(ie)%state%dp3d(:,:,:,tl_f),                                &
-               elem(ie)%state%T(:,:,:,tl_f),                                   &
-               elem(ie)%derived%omega(:,:,:),                                  &
-               ! fvm state
-               dyn_out%fvm(ie)%dp_fvm(:,:,:,n0_fvm),                           &
-               dyn_out%fvm(ie)%c(:,:,:,1:ntrac,n0_fvm),                        &
-               pcnst, qsize, elem(ie)%metdet, ntrac>0, dyn_out%fvm(ie),        &
-               !
-               hyai(1)*ps0,                                                    &
-               ! output
-               dp3d_tmp(:,:,ie), ps_tmp(:,ie), q_tmp(:,:,:,ie), T_tmp(:,:,ie), &
-               omega_tmp(:,:,ie), phis_tmp(:,ie)                               &
-               )
             uv_tmp(:,:,:,ie) = &
                dyn2phys_vector(elem(ie)%state%v(:,:,:,:,tl_f),elem(ie))
          end do
@@ -188,7 +181,7 @@ subroutine d_p_coupling(phys_state, phys_tend,  pbuf2d, dyn_out)
              qgll(:,:,:,m) = elem(ie)%state%Qdp(:,:,:,m,tl_qdp_np0)*inv_dp3d(:,:,:)
            end do
             ncols = elem(ie)%idxP%NumUniquePts
-            call UniquePoints(elem(ie)%idxP, elem(ie)%state%psdry(:,:,tl_f), ps_tmp(1:ncols,ie))
+            call UniquePoints(elem(ie)%idxP, elem(ie)%state%psdry(:,:), ps_tmp(1:ncols,ie))
             call UniquePoints(elem(ie)%idxP, nlev, elem(ie)%state%dp3d(:,:,:,tl_f), dp3d_tmp(1:ncols,:,ie))
             call UniquePoints(elem(ie)%idxP, nlev, elem(ie)%state%T(:,:,:,tl_f), T_tmp(1:ncols,:,ie))
             call UniquePoints(elem(ie)%idxV, 2, nlev, elem(ie)%state%V(:,:,:,:,tl_f), uv_tmp(1:ncols,:,:,ie))
@@ -228,7 +221,7 @@ subroutine d_p_coupling(phys_state, phys_tend,  pbuf2d, dyn_out)
    call t_startf('dpcopy')
    if (local_dp_map) then
 
-      !$omp parallel do num_threads(horz_num_threads) private (lchnk, ncols, pgcols, icol, idmb1, idmb2, idmb3, ie, ioff, ilyr, m, pbuf_chnk, pbuf_frontgf, pbuf_frontga)
+      !$omp parallel do num_threads(max_num_threads) private (lchnk, ncols, pgcols, icol, idmb1, idmb2, idmb3, ie, ioff, ilyr, m, pbuf_chnk, pbuf_frontgf, pbuf_frontga)
       do lchnk = begchunk, endchunk
 
          ncols = get_ncols_p(lchnk)
@@ -281,7 +274,7 @@ subroutine d_p_coupling(phys_state, phys_tend,  pbuf2d, dyn_out)
       end if
 
       if (iam < par%nprocs) then
-         !$omp parallel do num_threads(horz_num_threads) private (ie, bpter, icol, ilyr, m, ncols, ioff)
+         !$omp parallel do num_threads(max_num_threads) private (ie, bpter, icol, ilyr, m, ncols, ioff)
          do ie = 1, nelemd
 
             if (fv_nphys > 0) then
@@ -333,7 +326,7 @@ subroutine d_p_coupling(phys_state, phys_tend,  pbuf2d, dyn_out)
       call transpose_block_to_chunk(tsize, bbuffer, cbuffer)
       call t_stopf  ('block_to_chunk')
 
-      !$omp parallel do num_threads(horz_num_threads) private (lchnk, ncols, cpter, icol, ilyr, m, pbuf_chnk, pbuf_frontgf, pbuf_frontga, ioff)
+      !$omp parallel do num_threads(max_num_threads) private (lchnk, ncols, cpter, icol, ilyr, m, pbuf_chnk, pbuf_frontgf, pbuf_frontga, ioff)
       do lchnk = begchunk, endchunk
          ncols = phys_state(lchnk)%ncol
 
@@ -383,7 +376,8 @@ subroutine d_p_coupling(phys_state, phys_tend,  pbuf2d, dyn_out)
    end if
    call t_stopf('dpcopy')
 
-   ! Save the tracer fields for calculating tendencies
+   ! Save the tracer fields input to physics package for calculating tendencies
+   ! The mixing ratios are all dry at this point.
    do lchnk = begchunk, endchunk
       ncols = phys_state(lchnk)%ncol
       q_prev(1:ncols,1:pver,1:pcnst,lchnk) = phys_state(lchnk)%q(1:ncols,1:pver,1:pcnst)
@@ -399,23 +393,26 @@ subroutine d_p_coupling(phys_state, phys_tend,  pbuf2d, dyn_out)
    deallocate(q_tmp)
    deallocate(omega_tmp)
 
+   ! ps, pdel, and q in phys_state are all dry at this point.  After return from derived_phys_dry
+   ! ps and pdel include water vapor only, and the 'wet' constituents have been converted to wet mmr.
    call t_startf('derived_phys')
    call derived_phys_dry(phys_state, phys_tend, pbuf2d)
    call t_stopf('derived_phys')
 
-!$omp parallel do private (lchnk, ncols, ilyr, icol)
+  !$omp parallel do num_threads(max_num_threads) private (lchnk, ncols, ilyr, icol)
    do lchnk = begchunk, endchunk
       ncols=get_ncols_p(lchnk)
       if (pcols > ncols) then
          phys_state(lchnk)%phis(ncols+1:) = 0.0_r8
       end if
    end do
-
 end subroutine d_p_coupling
 
 !=========================================================================================
 
 subroutine p_d_coupling(phys_state, phys_tend, dyn_in, tl_f, tl_qdp)
+
+   ! Convert the physics output state into the dynamics input state.
 
    use bndry_mod,              only: bndry_exchange
    use edge_mod,               only: edgeVpack, edgeVunpack
@@ -426,7 +423,7 @@ subroutine p_d_coupling(phys_state, phys_tend, dyn_in, tl_f, tl_qdp)
    ! arguments
    type(physics_state), intent(inout), dimension(begchunk:endchunk) :: phys_state
    type(physics_tend),  intent(inout), dimension(begchunk:endchunk) :: phys_tend
-   integer, intent(in)                                              :: tl_qdp, tl_f
+   integer,             intent(in)                                  :: tl_qdp, tl_f
    type(dyn_import_t),  intent(inout)                               :: dyn_in
    type(hybrid_t)                                                   :: hybrid
 
@@ -450,12 +447,10 @@ subroutine p_d_coupling(phys_state, phys_tend, dyn_in, tl_f, tl_qdp)
    real (kind=r8),  allocatable :: bbuffer(:), cbuffer(:) ! transpose buffers
 
    real (kind=r8)               :: factor
-
    integer                      :: num_trac
-   integer                      :: nets,nete
-   integer                      :: kptr,ii
+   integer                      :: nets, nete
+   integer                      :: kptr, ii
    !----------------------------------------------------------------------------
-
    if (iam < par%nprocs) then
       elem => dyn_in%elem
    else
@@ -475,16 +470,38 @@ subroutine p_d_coupling(phys_state, phys_tend, dyn_in, tl_f, tl_qdp)
       call endrun('p_d_coupling: q_prev not allocated')
    end if
 
+   ! Convert wet to dry mixing ratios and modify the physics temperature
+   ! tendency to be thermodynamically consistent with the dycore.
+   !$omp parallel do num_threads(max_num_threads) private (lchnk, ncols, icol, ilyr, m, factor)
+   do lchnk = begchunk, endchunk
+      ncols = get_ncols_p(lchnk)
+      do icol = 1, ncols
+         do ilyr = 1, pver
+            ! convert wet mixing ratios to dry
+            factor = phys_state(lchnk)%pdel(icol,ilyr)/phys_state(lchnk)%pdeldry(icol,ilyr)
+            do m = 1, pcnst
+               if (cnst_type(m) == 'wet') then
+                  phys_state(lchnk)%q(icol,ilyr,m) = factor*phys_state(lchnk)%q(icol,ilyr,m)
+               end if
+            end do
+            call thermodynamic_consistency( &
+               phys_state(lchnk), phys_tend(lchnk), icol, ilyr, q_prev(icol,ilyr,1,lchnk))
+         end do
+      end do
+   end do
+
+
    call t_startf('pd_copy')
    if (local_dp_map) then
 
-      !$omp parallel do num_threads(horz_num_threads) private (lchnk, ncols, pgcols, icol, idmb1, idmb2, idmb3, ie, ioff, ilyr, m, factor)
+      !$omp parallel do num_threads(max_num_threads) private (lchnk, ncols, pgcols, icol, idmb1, idmb2, idmb3, ie, ioff, ilyr, m)
       do lchnk = begchunk, endchunk
          ncols = get_ncols_p(lchnk)
          call get_gcol_all_p(lchnk, pcols, pgcols)
 
-         call test_mapping_overwrite_tendencies(phys_state(lchnk), phys_tend(lchnk), ncols,&
-            lchnk, q_prev(1:ncols,:,:,lchnk))
+         ! test code -- does nothing unless cpp macro debug_coupling is defined.
+         call test_mapping_overwrite_tendencies(phys_state(lchnk), phys_tend(lchnk), ncols, &
+            lchnk, q_prev(1:ncols,:,:,lchnk), dyn_in%fvm)
 
          do icol = 1, ncols
             call get_gcol_block_d(pgcols(icol), 1, idmb1, idmb2, idmb3)
@@ -492,20 +509,11 @@ subroutine p_d_coupling(phys_state, phys_tend, dyn_in, tl_f, tl_qdp)
             ioff = idmb2(1)
 
             do ilyr = 1, pver
-
-               ! phys_state%psdry units is Pa
                dp_phys(ioff,ilyr,ie)  = phys_state(lchnk)%pdeldry(icol,ilyr)
                T_tmp(ioff,ilyr,ie)    = phys_tend(lchnk)%dtdt(icol,ilyr)
                uv_tmp(ioff,1,ilyr,ie) = phys_tend(lchnk)%dudt(icol,ilyr)
                uv_tmp(ioff,2,ilyr,ie) = phys_tend(lchnk)%dvdt(icol,ilyr)
-
-               ! convert wet mixing ratios to dry
-               ! this code is equivalent to dme_adjust
-               factor = phys_state(lchnk)%pdel(icol,ilyr)/phys_state(lchnk)%pdeldry(icol,ilyr)
                do m = 1, pcnst
-                  if (cnst_type(m) == 'wet') then
-                     phys_state(lchnk)%q(icol,ilyr,m) = factor*phys_state(lchnk)%q(icol,ilyr,m)
-                  end if
                   dq_tmp(ioff,ilyr,m,ie) = (phys_state(lchnk)%q(icol,ilyr,m) - &
                                             q_prev(icol,ilyr,m,lchnk))
                end do
@@ -520,12 +528,12 @@ subroutine p_d_coupling(phys_state, phys_tend, dyn_in, tl_f, tl_qdp)
       allocate(bbuffer(tsize*block_buf_nrecs))
       allocate(cbuffer(tsize*chunk_buf_nrecs))
 
-      !$omp parallel do num_threads(horz_num_threads) private (lchnk, ncols, cpter, i, icol, ilyr, m, factor)
+      !$omp parallel do num_threads(max_num_threads) private (lchnk, ncols, cpter, i, icol, ilyr, m)
       do lchnk = begchunk, endchunk
          ncols = get_ncols_p(lchnk)
 
          call test_mapping_overwrite_tendencies(phys_state(lchnk), phys_tend(lchnk), ncols, lchnk, &
-                                                q_prev(1:ncols,:,:,lchnk))
+                                                q_prev(1:ncols,:,:,lchnk), dyn_in%fvm)
 
          call chunk_to_block_send_pters(lchnk, pcols, pver+1, tsize, cpter)
 
@@ -539,19 +547,12 @@ subroutine p_d_coupling(phys_state, phys_tend, dyn_in, tl_f, tl_qdp)
                cbuffer(cpter(icol,ilyr)+1) = phys_tend(lchnk)%dudt(icol,ilyr)
                cbuffer(cpter(icol,ilyr)+2) = phys_tend(lchnk)%dvdt(icol,ilyr)
                cbuffer(cpter(icol,ilyr)+3) = phys_state(lchnk)%pdeldry(icol,ilyr)
-
-               ! this code is equivalent to dme_adjust
-               factor = phys_state(lchnk)%pdel(icol,ilyr)/phys_state(lchnk)%pdeldry(icol,ilyr)
-
                do m = 1, pcnst
-                  if (cnst_type(m) == 'wet') then
-                     phys_state(lchnk)%q(icol,ilyr,m) = factor*phys_state(lchnk)%q(icol,ilyr,m)
-                  end if
                   cbuffer(cpter(icol,ilyr)+3+m) = (phys_state(lchnk)%q(icol,ilyr,m) - &
                                                    q_prev(icol,ilyr,m,lchnk))
-               end do
+                end do
             end do
-         end do
+          end do
       end do
 
       call t_barrierf('sync_chk_to_blk', mpicom)
@@ -567,7 +568,7 @@ subroutine p_d_coupling(phys_state, phys_tend, dyn_in, tl_f, tl_qdp)
             allocate(bpter(npsq,0:pver))
          end if
 
-         !$omp parallel do num_threads(horz_num_threads) private (ie, bpter, icol, ilyr, m, ncols)
+         !$omp parallel do num_threads(max_num_threads) private (ie, bpter, icol, ilyr, m, ncols)
          do ie = 1, nelemd
 
             if (fv_nphys > 0) then
@@ -603,6 +604,7 @@ subroutine p_d_coupling(phys_state, phys_tend, dyn_in, tl_f, tl_qdp)
    end if
    call t_stopf('pd_copy')
 
+   
    if (iam < par%nprocs) then
 
       if (fv_nphys > 0) then
@@ -613,10 +615,10 @@ subroutine p_d_coupling(phys_state, phys_tend, dyn_in, tl_f, tl_qdp)
             do j = 1, fv_nphys
                do i = 1, fv_nphys
                   ii = i + (j-1)*fv_nphys
-                  dyn_in%fvm(ie)%ft(i,j,1:pver)     = T_tmp(ii,1:pver,ie)
-                  dyn_in%fvm(ie)%fm(i,j,1:2,1:pver) = uv_tmp(ii,1:2,1:pver,ie)
+                  dyn_in%fvm(ie)%ft(i,j,1:pver)                 = T_tmp(ii,1:pver,ie)
+                  dyn_in%fvm(ie)%fm(i,j,1:2,1:pver)             = uv_tmp(ii,1:2,1:pver,ie)
                   dyn_in%fvm(ie)%fc_phys(i,j,1:pver,1:num_trac) = dq_tmp(ii,1:pver,1:num_trac,ie)
-                  dyn_in%fvm(ie)%dp_phys(i,j,1:pver) = dp_phys(ii,1:pver,ie)
+                  dyn_in%fvm(ie)%dp_phys(i,j,1:pver)            = dp_phys(ii,1:pver,ie)
                end do
             end do
          end do
@@ -634,7 +636,7 @@ subroutine p_d_coupling(phys_state, phys_tend, dyn_in, tl_f, tl_qdp)
 
          call t_startf('putUniquePoints')
 
-         !$omp parallel do num_threads(horz_num_threads) private(ie,ncols)
+         !$omp parallel do num_threads(max_num_threads) private(ie,ncols)
          do ie = 1, nelemd
             ncols = elem(ie)%idxP%NumUniquePts
             call putUniquePoints(elem(ie)%idxP, nlev, T_tmp(1:ncols,:,ie),       &
@@ -658,7 +660,7 @@ subroutine p_d_coupling(phys_state, phys_tend, dyn_in, tl_f, tl_qdp)
    ! so do a simple sum (boundary exchange with no weights).
    ! For physics grid, we interpolated into all points, so do weighted average.
 
-   call t_startf('bndry_exchange')
+   call t_startf('p_d_coupling:bndry_exchange')
 
    do ie = 1, nelemd
       if (fv_nphys > 0) then
@@ -717,18 +719,23 @@ subroutine p_d_coupling(phys_state, phys_tend, dyn_in, tl_f, tl_qdp)
          end do
       end if
    end do
-   call t_stopf('bndry_exchange')
+   call t_stopf('p_d_coupling:bndry_exchange')
 
    if (iam < par%nprocs .and. fv_nphys > 0) then
       call test_mapping_output_mapped_tendencies(dyn_in%fvm(1:nelemd), elem(1:nelemd), &
                                                  1, nelemd, tl_f, tl_qdp)
    end if
-
 end subroutine p_d_coupling
 
 !=========================================================================================
 
 subroutine derived_phys_dry(phys_state, phys_tend, pbuf2d)
+
+   ! The ps, pdel, and q components of phys_state are all dry on input.
+   ! On output the psdry and pdeldry components are initialized; ps and pdel are
+   ! updated to contain contribution from water vapor only; the 'wet' constituent
+   ! mixing ratios are converted to a wet basis.  Initialize geopotential heights.
+   ! Finally compute energy and water column integrals of the physics input state.
 
    use constituents,  only: qmin
    use physconst,     only: cpair, gravit, rair, zvir, cappa, rairv,rh2o,rair
@@ -765,7 +772,7 @@ subroutine derived_phys_dry(phys_state, phys_tend, pbuf2d)
 
    ! Evaluate derived quantities
 
-   !$omp parallel do num_threads(horz_num_threads) private (lchnk, ncol, k, i, m , zvirv, pbuf_chnk, factor_array)
+   !!$omp parallel do num_threads(horz_num_threads) private (lchnk, ncol, k, i, m , zvirv, pbuf_chnk, factor_array)
    do lchnk = begchunk,endchunk
 
       ncol = get_ncols_p(lchnk)
@@ -895,6 +902,50 @@ subroutine derived_phys_dry(phys_state, phys_tend, pbuf2d)
    end do  ! lchnk
 
 end subroutine derived_phys_dry
+
+!=========================================================================================
+
+subroutine thermodynamic_consistency(phys_state, phys_tend, icol, ilyr, q_prev)
+
+   ! Adjust the physics temperature tendency for thermal energy consistency with the
+   ! dynamics.
+   ! Note: mixing ratios are assumed to be dry.
+   
+   use dimensions_mod,    only: qsize_condensate_loading,qsize_condensate_loading_idx
+   use dimensions_mod,    only: qsize_condensate_loading_cp, lcp_moist
+   use control_mod,       only: phys_dyn_cp
+   use physconst,         only: cpair
+
+   type(physics_state), intent(in)    :: phys_state
+   type(physics_tend ), intent(inout) :: phys_tend  
+   integer,  intent(in)               :: icol,ilyr
+   real(r8), intent(in)               :: q_prev
+  
+   integer :: nq, m
+   real(r8):: facor, sum_water, sum_cp, factor
+   !----------------------------------------------------------------------------
+
+   if (lcp_moist.and.phys_dyn_cp==1) then
+     factor = 1.0_r8
+     sum_cp    = cpair
+     sum_water = 1.0_r8                    
+     do nq=1,qsize_condensate_loading
+       m = qsize_condensate_loading_idx(nq)
+       sum_cp  = sum_cp+qsize_condensate_loading_cp(nq)*phys_state%q(icol,ilyr,m)
+       sum_water = sum_water + phys_state%q(icol,ilyr,m)
+     end do
+     !
+     ! scale temperature tendency so that thermal energy increment from physics
+     ! matches SE (not taking into account dme adjust)
+     !
+     ! note that if lcp_moist=.false. then there is thermal energy increment
+     ! consistency (not taking into account dme adjust) 
+     !
+     !
+     factor = cpair*sum_water/sum_cp
+     phys_tend%dtdt(icol,ilyr) = phys_tend%dtdt(icol,ilyr)*factor
+   end if 
+end subroutine thermodynamic_consistency
 
 !=========================================================================================
 

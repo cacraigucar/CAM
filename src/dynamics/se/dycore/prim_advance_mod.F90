@@ -5,36 +5,35 @@ module prim_advance_mod
   use cam_abortutils, only: endrun
   use parallel_mod,   only: parallel_t, HME_BNDRY_P2P!,HME_BNDRY_A2A
   use control_mod,    only: se_prescribed_wind_2d
-  use thread_mod ,    only: horz_num_threads, vert_num_threads
+  use thread_mod ,    only: horz_num_threads, vert_num_threads, omp_set_nested
 
   implicit none
   private
   save
   
   public :: prim_advance_exp, prim_advance_init, applyCAMforcing, calc_tot_energy_dynamics, compute_omega
+  public :: del2_sponge_uvt_tendencies
 
-  type (EdgeBuffer_t) :: edge3p1
+  type (EdgeBuffer_t) :: edge3,edgeOmega,edgeSponge
   real (kind=r8), allocatable :: ur_weights(:)
-  
+
 contains
   
   subroutine prim_advance_init(par, elem)
     use edge_mod,       only: initEdgeBuffer
     use element_mod,    only: element_t
-    use dimensions_mod, only: nlev,hypervis_on_plevs
+    use dimensions_mod, only: nlev,ksponge_end
     use control_mod,    only: qsplit,nu_p
     
     type (parallel_t)                       :: par
     type (element_t), target, intent(inout) :: elem(:)
     integer                                 :: i
 
-    if (hypervis_on_plevs.and.nu_p>0) then
-      call initEdgeBuffer(par,edge3p1,elem,5*nlev+1,bndry_type=HME_BNDRY_P2P, nthreads=horz_num_threads)
-    else
-      call initEdgeBuffer(par,edge3p1,elem,4*nlev+1,bndry_type=HME_BNDRY_P2P, nthreads=horz_num_threads)
-    end if
+    call initEdgeBuffer(par,edge3   ,elem,4*nlev   ,bndry_type=HME_BNDRY_P2P, nthreads=horz_num_threads)
+    call initEdgeBuffer(par,edgeSponge,elem,4*ksponge_end,bndry_type=HME_BNDRY_P2P, nthreads=horz_num_threads)
+    call initEdgeBuffer(par,edgeOmega ,elem,nlev         ,bndry_type=HME_BNDRY_P2P, nthreads=horz_num_threads)
     
-    allocate(ur_weights(qsplit))
+    if(.not. allocated(ur_weights)) allocate(ur_weights(qsplit))
     ur_weights(:)=0.0_r8
     
     if(mod(qsplit,2).NE.0)then
@@ -50,7 +49,7 @@ contains
   end subroutine prim_advance_init
   
   
-  subroutine prim_advance_exp(elem, deriv, hvcoord, hybrid,dt, tl,  nets, nete)   
+  subroutine prim_advance_exp(elem, fvm, deriv, hvcoord, hybrid,dt, tl,  nets, nete)   
     use control_mod,       only: prescribed_wind, tstep_type, qsplit
     use derivative_mod,    only: derivative_t
     use dimensions_mod,    only: np, nlev, ntrac
@@ -61,11 +60,13 @@ contains
     use dimensions_mod,    only: qsize_condensate_loading,qsize_condensate_loading_idx_gll
     use dimensions_mod,    only: qsize_condensate_loading_cp, lcp_moist
     use physconst,         only: cpair
-
+    use fvm_control_volume_mod, only: fvm_struct
+    use control_mod,       only: raytau0
     
     implicit none
     
     type (element_t), intent(inout), target   :: elem(:)
+    type(fvm_struct)     , intent(in) :: fvm(:)
     type (derivative_t)  , intent(in) :: deriv
     type (hvcoord_t)                  :: hvcoord
     type (hybrid_t)      , intent(in) :: hybrid
@@ -107,9 +108,7 @@ contains
     !                 (K&G 2nd order method has CFL=4. tiny CFL improvement not worth 2nd order)
     !
 
-#ifdef _OPENMP
     call omp_set_nested(.true.)
-#endif
 
     ! default weights for computing mean dynamics fluxes
     eta_ave_w = 1_r8/qsplit
@@ -125,7 +124,7 @@ contains
       
       do ie=nets,nete
         ! subcycling code uses a mean flux to advect tracers
- !$omp parallel do num_threads (vert_num_threads) private(dp)
+ !$omp parallel do num_threads (vert_num_threads) private(k,dp)
         do k=1,nlev
           dp(:,:) = elem(ie)%state%dp3d(:,:,k,tl%n0)
           
@@ -178,6 +177,8 @@ contains
     end if
     
     dt_vis = dt
+
+    if (raytau0>0) call rayleigh_friction(elem,n0,nets,nete,dt)    
     if (tstep_type==1) then
       ! RK2-SSP 3 stage.  matches tracer scheme. optimal SSP CFL, but
       ! not optimal for regular CFL
@@ -280,56 +281,66 @@ contains
     ! for consistency, dt_vis = t-1 - t*, so this is timestep method dependent
 
     ! forward-in-time, hypervis applied to dp3d
-    call advance_hypervis_dp(edge3p1,elem,hybrid,deriv,np1,qn0,nets,nete,dt_vis,eta_ave_w,&
+    call advance_hypervis_dp(edge3,elem,fvm,hybrid,deriv,np1,qn0,nets,nete,dt_vis,eta_ave_w,&
          inv_cp_full,hvcoord)
 
     call t_stopf('advance_hypervis')
-
+    !
+    ! update psdry
+    !
+    do ie=nets,nete
+      elem(ie)%state%psdry(:,:) = hvcoord%hyai(1)*hvcoord%ps0
+      do k=1,nlev
+        elem(ie)%state%psdry(:,:) = elem(ie)%state%psdry(:,:)+elem(ie)%state%dp3d(:,:,k,np1)
+      end do
+    end do
     tevolve=tevolve+dt
 
-#ifdef _OPENMP
     call omp_set_nested(.false.)
-#endif
 
     call t_stopf('prim_advance_exp')
   end subroutine prim_advance_exp
 
 
-  subroutine applyCAMforcing(elem,fvm,np1,np1_qdp,dt_q,nets,nete,nsubstep)
+  subroutine applyCAMforcing(elem,fvm,np1,np1_qdp,dt_dribble,dt_phys,nets,nete,nsubstep)
     use dimensions_mod,         only: np, nc, nlev, qsize, ntrac, nelemd
     use element_mod,            only: element_t
     use time_mod,               only: nsplit
-    use control_mod,            only: ftype
-    use fvm_control_volume_mod, only: fvm_struct, n0_fvm
-    
+    use control_mod,            only: ftype, ftype_conserve
+    use fvm_control_volume_mod, only: fvm_struct
+    use dimensions_mod,         only: qsize_condensate_loading, qsize_condensate_loading_idx_gll    
     type (element_t)     , intent(inout) :: elem(:)
     type(fvm_struct)     , intent(inout) :: fvm(:)
-    real (kind=r8), intent(in) :: dt_q
+    real (kind=r8), intent(in) :: dt_dribble, dt_phys
     integer,  intent(in) :: np1,nets,nete,np1_qdp,nsubstep
     
     ! local
-    integer :: i,j,k,ie,q
-    real (kind=r8) :: v1,dt_local, dt_local_tracer
-    real (kind=r8) :: dt_local_tracer_fvm
-    real (kind=r8) :: ftmp(np,np,nlev,qsize,nelemd) !diagnostics
+    integer :: i,j,k,ie,q,m_cnst,nq
+    real (kind=r8) :: v1,dt_local, dt_local_tracer,tmp,stmp
+    real (kind=r8) :: dt_local_tracer_fvm,pdel
+    real (kind=r8) :: ftmp(np,np,nlev,qsize,nets:nete) !diagnostics
+    real (kind=r8), allocatable :: ftmp_fvm(:,:,:,:,:) !diagnostics
+
     
+    if (ntrac>0) allocate(ftmp_fvm(nc,nc,nlev,ntrac,nets:nete))
+
     if (ftype==0) then
       !
       ! "Dribble" tendencies: divide total adjustment with nsplit and
       !                       add adjustments to state after each
       !                       vertical remap
       !
-      dt_local            = dt_q
-      dt_local_tracer     = dt_q
-      dt_local_tracer_fvm = dt_q
+      dt_local            = dt_dribble
+      dt_local_tracer     = dt_dribble
+      dt_local_tracer_fvm = dt_dribble
     else if (ftype==1) then
       !
       ! CAM-FV-stype forcing, i.e. equivalent to updating state once in the
       ! beginning of dynamics
       !
-      dt_local            = nsplit*dt_q
-      dt_local_tracer     = nsplit*dt_q
-      dt_local_tracer_fvm = nsplit*dt_q
+      dt_local            = dt_phys
+      dt_local_tracer     = dt_phys
+      dt_local_tracer_fvm = dt_phys
       if (nsubstep.ne.1) then
         !
         ! do nothing
@@ -342,16 +353,16 @@ contains
       !
       ! do state-update for tracers and "dribbling" forcing for u,v,T
       !
-      dt_local            = dt_q
+      dt_local            = dt_dribble
       if (ntrac>0) then
-        dt_local_tracer     = dt_q
-        dt_local_tracer_fvm = nsplit*dt_q
+        dt_local_tracer     = dt_dribble
+        dt_local_tracer_fvm = dt_phys
         if (nsubstep.ne.1) then
           dt_local_tracer_fvm = 0.0_r8
         end if
       else
-        dt_local_tracer     = nsplit*dt_q
-        dt_local_tracer_fvm = nsplit*dt_q
+        dt_local_tracer     = dt_phys
+        dt_local_tracer_fvm = dt_phys
         if (nsubstep.ne.1) then
           dt_local_tracer     = 0.0_r8
           dt_local_tracer_fvm = 0.0_r8
@@ -359,19 +370,14 @@ contains
       end if
     end if
 
-    do ie=nets,nete
-      elem(ie)%state%T(:,:,:,np1) = elem(ie)%state%T(:,:,:,np1) + &
-           dt_local*elem(ie)%derived%FT(:,:,:)
-      elem(ie)%state%v(:,:,:,:,np1) = elem(ie)%state%v(:,:,:,:,np1) + &
-           dt_local*elem(ie)%derived%FM(:,:,:,:)
-      
-#if (defined COLUMN_OPENMP)
-    !$omp parallel do private(q,k,i,j,v1)
-#endif
+    do ie=nets,nete      
       !
       ! tracers
       !
       if (qsize>0.and.dt_local_tracer>0) then
+#if (defined COLUMN_OPENMP)
+    !$omp parallel do num_threads(tracer_num_threads) private(q,k,i,j,v1)
+#endif
         do q=1,qsize
           do k=1,nlev
             do j=1,np
@@ -405,26 +411,67 @@ contains
           do k = 1, nlev
             do j = 1, nc
               do i = 1, nc
-                v1 = dt_local_tracer_fvm*fvm(ie)%fc(i,j,k,q)/fvm(ie)%dp_fvm(i,j,k,n0_fvm)
-                if (fvm(ie)%c(i,j,k,q,n0_fvm) + v1 < 0 .and. v1<0) then
-                  if (fvm(ie)%c(i,j,k,q,n0_fvm) < 0 ) then
+                tmp = dt_local_tracer_fvm*fvm(ie)%fc(i,j,k,q)/fvm(ie)%dp_fvm(i,j,k)
+                v1 = tmp
+                if (fvm(ie)%c(i,j,k,q) + v1 < 0 .and. v1<0) then
+                  if (fvm(ie)%c(i,j,k,q) < 0 ) then
                     v1 = 0  ! C already negative, dont make it more so
                   else
-                    v1 = -fvm(ie)%c(i,j,k,q,n0_fvm)
+                    v1 = -fvm(ie)%c(i,j,k,q)
                   end if
                 end if
-                fvm(ie)%c(i,j,k,q,n0_fvm) = fvm(ie)%c(i,j,k,q,n0_fvm)+ v1
+                fvm(ie)%c(i,j,k,q) = fvm(ie)%c(i,j,k,q)+ v1
+                ftmp_fvm(i,j,k,q,ie) = tmp-v1 !Only used for diagnostics!
               end do
             end do
           end do
         end do
+      else
+        if (ntrac>0) ftmp_fvm(:,:,:,:,ie) = 0.0_r8
+      end if
+      
+      
+      if (ftype_conserve==1) then
+        do k=1,nlev
+          do j=1,np
+            do i = 1,np
+              pdel     = elem(ie)%state%dp3d(i,j,k,np1)
+              do nq=1,qsize_condensate_loading
+                m_cnst = qsize_condensate_loading_idx_gll(nq)
+                pdel = pdel + elem(ie)%state%Qdp(i,j,k,m_cnst,np1_qdp)
+              end do
+              pdel=elem(ie)%derived%FDP(i,j,k)/pdel
+
+              elem(ie)%state%T(i,j,k,np1) = elem(ie)%state%T(i,j,k,np1) + &
+                   dt_local*elem(ie)%derived%FT(i,j,k)*pdel
+              !
+              ! momentum conserving: dp*u
+              !
+              elem(ie)%state%v(i,j,1,k,np1) = elem(ie)%state%v(i,j,1,k,np1) + &
+                   dt_local*elem(ie)%derived%FM(i,j,1,k)*pdel!elem(ie)%state%dp3d(i,j,k,np1)
+              elem(ie)%state%v(i,j,2,k,np1) = elem(ie)%state%v(i,j,2,k,np1) + &
+                   dt_local*elem(ie)%derived%FM(i,j,2,k)*pdel!/elem(ie)%state%dp3d(i,j,k,np1)
+            end do
+          end do
+        end do
+      else
+        elem(ie)%state%T(:,:,:,np1) = elem(ie)%state%T(:,:,:,np1) + &
+             dt_local*elem(ie)%derived%FT(:,:,:)
+        elem(ie)%state%v(:,:,:,:,np1) = elem(ie)%state%v(:,:,:,:,np1) + &
+             dt_local*elem(ie)%derived%FM(:,:,:,:)
       end if
     end do
-    call output_qdp_var_dynamics(ftmp(:,:,:,:,:),nets,nete,'PDC')
-    call calc_tot_energy_dynamics(elem,nets,nete,np1,np1_qdp,'dBD')
+    if (ntrac>0) then
+      call output_qdp_var_dynamics(ftmp_fvm(:,:,:,:,:),nc,ntrac,nets,nete,'PDC')
+    else
+      call output_qdp_var_dynamics(ftmp(:,:,:,:,:),np,qsize,nets,nete,'PDC')
+    end if
+    if (ftype==1.and.nsubstep==1) call calc_tot_energy_dynamics(elem,fvm,nets,nete,np1,np1_qdp,'p2d')
+    if (ntrac>0) deallocate(ftmp_fvm)
   end subroutine applyCAMforcing
 
-  subroutine advance_hypervis_dp(edge3,elem,hybrid,deriv,nt,qn0,nets,nete,dt2,eta_ave_w,inv_cp_full,hvcoord)
+
+  subroutine advance_hypervis_dp(edge3,elem,fvm,hybrid,deriv,nt,qn0,nets,nete,dt2,eta_ave_w,inv_cp_full,hvcoord)
     !
     !  take one timestep of:
     !          u(:,:,:,np) = u(:,:,:,np) +  dt2*nu*laplacian**order ( u )
@@ -434,9 +481,11 @@ contains
     !  For correct scaling, dt2 should be the same 'dt2' used in the leapfrog advace
     !
     !
-    use dimensions_mod, only: np, np, nlev, nc, ntrac
-    use dimensions_mod, only: hypervis_on_plevs
-    use control_mod,    only: nu, nu_s, hypervis_subcycle, nu_p, nu_top
+    use physconst,      only: gravit, cappa, rair, cpair, tref, lapse_rate
+    use dimensions_mod, only: np, nlev, nc, ntrac
+    use dimensions_mod, only: hypervis_dynamic_ref_state,nu_scale_top,ksponge_end
+    use dimensions_mod, only: max_nu_scale_del4
+    use control_mod,    only: nu, nu_s, hypervis_subcycle,hypervis_subcycle_sponge, nu_p, nu_top, hypervis_scaling
     use hybrid_mod,     only: hybrid_t!, get_loop_ranges
     use element_mod,    only: element_t
     use derivative_mod, only: derivative_t, laplace_sphere_wk, vlaplace_sphere_wk
@@ -446,9 +495,11 @@ contains
     use bndry_mod,      only: bndry_exchange
     use viscosity_mod,  only: biharmonic_wk_dp3d
     use hybvcoord_mod,  only: hvcoord_t
+    use fvm_control_volume_mod, only: fvm_struct
     
     type (hybrid_t)    , intent(in)   :: hybrid
     type (element_t)   , intent(inout), target :: elem(:)
+    type(fvm_struct)   , intent(in)   :: fvm(:)
     type (EdgeBuffer_t), intent(inout):: edge3
     type (derivative_t), intent(in  ) :: deriv
     integer            , intent(in)   :: nets,nete, nt, qn0
@@ -458,15 +509,16 @@ contains
     real (kind=r8) :: dt2
 
     ! local
-    real (kind=r8) :: nu_scale_top
     integer :: k,kptr,i,j,ie,ic
     integer :: kbeg, kend, kblk
     real (kind=r8), dimension(np,np,2,nlev,nets:nete)      :: vtens
-    real (kind=r8), dimension(np,np,nlev,nets:nete)        :: ttens
-    real (kind=r8), dimension(np,np,nlev,nets:nete)        :: dptens
-    real (kind=r8), dimension(np,np,nlev,nets:nete)        :: dptens_ref,dp3d_ref
+    real (kind=r8), dimension(np,np,nlev,nets:nete)        :: ttens, dptens
+    real (kind=r8), dimension(np,np,nlev,nets:nete)        :: dp3d_ref, T_ref
+    real (kind=r8), dimension(np,np,nets:nete)             :: ps_ref
     real (kind=r8), dimension(0:np+1,0:np+1,nlev)          :: corners
     real (kind=r8), dimension(2,2,2)                       :: cflux
+    real (kind=r8)                                         :: temp      (np,np,nlev)
+    real (kind=r8)                                         :: tempflux(nc,nc,4)
     real (kind=r8), dimension(nc,nc,4,nlev,nets:nete)      :: dpflux
     real (kind=r8), dimension(np,np,nlev)                  :: nabla4_pk,pk,inv_dpk
     type (EdgeDescriptor_t)                                :: desc    
@@ -478,20 +530,54 @@ contains
     !       real (kind=r8), dimension(:,:,:), pointer   :: ps
     
     real (kind=r8), dimension(np,np)   :: lap_t,lap_dp
+    real (kind=r8), dimension(np,np)   :: tmp, tmp2
     real (kind=r8), dimension(np,np,2) :: lap_v
-    real (kind=r8)                     :: v1,v2,dt,heating
-    real (kind=r8)                     :: temp      (np,np,nlev)
+    real (kind=r8)                     :: v1,v2,dt,heating,T0,T1
     real (kind=r8)                     :: laplace_fluxes(nc,nc,4)
-    real (kind=r8)                     :: tempflux(nc,nc,4)
     real (kind=r8)                     :: rhypervis_subcycle
-    
+    real (kind=r8)                     :: nu_ratio1,nu_scale_del4_top
+
     if (nu_s == 0 .and. nu == 0 .and. nu_p==0 ) return;
-    call t_startf('advance_hypervis_dp')
 
-    if (hypervis_on_plevs.and.nu_p>0)&
-         call calc_dp3d_reference(elem,deriv,edge3p1,hybrid,nets,nete,nt,hvcoord,dp3d_ref)
+    if (hypervis_dynamic_ref_state) then
+      !
+      ! use dynamic reference pressure (P. Callaghan)
+      !
+      call calc_dp3d_reference(elem,edge3,hybrid,nets,nete,nt,hvcoord,dp3d_ref)
+      do ie=nets,nete
+        ps_ref(:,:,ie) = hvcoord%hyai(1)*hvcoord%ps0 + sum(elem(ie)%state%dp3d(:,:,:,nt),3)
+      end do
+    else
+      !
+      ! use static reference pressure (hydrostatic balance incl. effect of topography)
+      !
+      do ie=nets,nete
+        ps_ref(:,:,ie) = hvcoord%ps0*exp(-elem(ie)%state%phis(:,:)/(Rair*Tref))
+        do k=1,nlev
+          dp3d_ref(:,:,k,ie) = ((hvcoord%hyai(k+1)-hvcoord%hyai(k))*hvcoord%ps0 + &
+               (hvcoord%hybi(k+1)-hvcoord%hybi(k))*ps_ref(:,:,ie))
+        end do
+      end do
+    endif
+    !      
+    ! reference temperature profile (Simmons and Jiabin, 1991, QJRMS, Section 2a)
+    !
+    !  Tref = T0+T1*Exner
+    !  T1 = .0065*Tref*Cp/g ! = ~191
+    !  T0 = Tref-T1         ! = ~97
+    !
+    T1 = lapse_rate*Tref*cpair/gravit
+    T0 = Tref-T1
+    do ie=nets,nete
+      do k=1,nlev
+        dp3d_ref(:,:,k,ie) = ((hvcoord%hyai(k+1)-hvcoord%hyai(k))*hvcoord%ps0 + &
+                              (hvcoord%hybi(k+1)-hvcoord%hybi(k))*ps_ref(:,:,ie))
+        tmp                = hvcoord%hyam(k)*hvcoord%ps0+hvcoord%hybm(k)*ps_ref(:,:,ie)
+        tmp2               = (tmp/hvcoord%ps0)**cappa
+        T_ref(:,:,k,ie)    = (T0+T1*tmp2)        
+      end do
+    end do
 
-    ! call get_loop_ranges(hybrid,kbeg=kbeg,kend=kend)
     kbeg=1; kend=nlev
     
     kblk = kend - kbeg + 1
@@ -503,47 +589,13 @@ contains
      !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 
     do ic=1,hypervis_subcycle
-      call calc_tot_energy_dynamics(elem,nets,nete,nt,qn0,'dBH')
+      call calc_tot_energy_dynamics(elem,fvm,nets,nete,nt,qn0,'dBH')
       
       rhypervis_subcycle=1.0_r8/real(hypervis_subcycle,kind=r8)
-      if (hypervis_on_plevs.and.nu_p>0) then
-        call biharmonic_wk_dp3d(elem,dptens_ref,dpflux,ttens,vtens,deriv,edge3,hybrid,nt,nets,nete,kbeg,kend,&
-             dptens,dp3d_ref)
-      else
-        call biharmonic_wk_dp3d(elem,dptens,dpflux,ttens,vtens,deriv,edge3,hybrid,nt,nets,nete,kbeg,kend)
-      end if
+      call biharmonic_wk_dp3d(elem,dptens,dpflux,ttens,vtens,deriv,edge3,hybrid,nt,nets,nete,kbeg,kend,&
+           dp3d_ref,T_ref)
+
       do ie=nets,nete
-        if (hypervis_on_plevs) then
-          !
-          ! compute \nabla^4 p_k
-          !
-          nabla4_pk(:,:,1) = 0.5_r8*dptens(:,:,1,ie)
-          do k=2,nlev
-            nabla4_pk(:,:,k) = nabla4_pk(:,:,k-1)+0.5_r8*dptens(:,:,k-1,ie)+0.5_r8*dptens(:,:,k,ie)
-          end do
-          pk(:,:,1) = 0.5_r8*elem(ie)%state%dp3d(:,:,1,nt)
-          do k=2,nlev
-            pk(:,:,k) = pk(:,:,k-1)+0.5_r8*elem(ie)%state%dp3d(:,:,k-1,nt)+0.5_r8*elem(ie)%state%dp3d(:,:,k,nt)
-          end do
-          inv_dpk(:,:,1) = 1.0_r8/(pk(:,:,2)-pk(:,:,1))
-          do k=2,nlev-1
-            inv_dpk(:,:,k) = 1.0_r8/(pk(:,:,k+1)-pk(:,:,k-1))
-          end do
-          inv_dpk(:,:,nlev) = 1.0_r8/(pk(:,:,nlev)-pk(:,:,nlev-1))
-          do k=1,nlev
-            !
-            ! viscosity on approximate pressure levels (section 3.3.6 in CAM5 scientific documentation; NCAR Tech. Note TN-486)
-            !
-            ttens(:,:,k,ie)   = ttens(:,:,k,ie)   -nabla4_pk(:,:,k)*(&
-                 inv_dpk(:,:,k)*(elem(ie)%state%T(:,:,MIN(k+1,nlev),nt)-elem(ie)%state%T(:,:,MAX(k-1,1),nt)))
-            !               vtens(:,:,1,k,ie) = vtens(:,:,1,k,ie) -nabla4_pk(:,:,k)*(&
-            !                    inv_dpk(:,:,k)*(elem(ie)%state%v(:,:,1,MIN(k+1,nlev),nt)-elem(ie)%state%v(:,:,1,MAX(k-1,1),nt)))
-            !               vtens(:,:,2,k,ie) = vtens(:,:,2,k,ie) -nabla4_pk(:,:,k)*(&
-            !                    inv_dpk(:,:,k)*(elem(ie)%state%v(:,:,2,MIN(k+1,nlev),nt)-elem(ie)%state%v(:,:,2,MAX(k-1,1),nt)))
-          end do
-          if (nu_p>0) dptens(:,:,:,ie) = dptens_ref(:,:,:,ie) !pressure damping will only be on difference between smoothed dp3d and dp3d
-        endif! done correction term
-        
         ! compute mean flux
         if (nu_p>0) then
           do k=kbeg,kend
@@ -559,61 +611,35 @@ contains
             enddo
           enddo
         endif
-        !$omp parallel do num_threads(vert_num_threads) private(lap_t,lap_dp,lap_v,laplace_fluxes,nu_scale_top)
+        !$omp parallel do num_threads(vert_num_threads) private(lap_t,lap_dp,lap_v,laplace_fluxes,nu_ratio1,i,j,k)
         do k=kbeg,kend
           ! advace in time.
           ! note: DSS commutes with time stepping, so we can time advance and then DSS.
           ! note: weak operators alreayd have mass matrix "included"
           
-          ! add regular diffusion in top 3 layers:
-          if (nu_top>0 .and. k<=3) then
-            call laplace_sphere_wk(elem(ie)%state%T(:,:,k,nt),deriv,elem(ie),lap_t,var_coef=.false.)
-            call laplace_sphere_wk(elem(ie)%state%dp3d(:,:,k,nt),deriv,elem(ie),lap_dp,var_coef=.false.)
-            call vlaplace_sphere_wk(elem(ie)%state%v(:,:,:,k,nt),deriv,elem(ie),lap_v, var_coef=.false.)
-          endif
-          nu_scale_top = 1
-          if (k==1) nu_scale_top=4
-          if (k==2) nu_scale_top=2
-          
-          ! biharmonic terms need a negative sign:
-          if (nu_top>0 .and. k<=3) then
-            !OMP_COLLAPSE_SIMD
-            !DIR_VECTOR_ALIGNED
-            do j=1,np
-              do i=1,np
-                ttens(i,j,k,ie)   = (-nu_s*ttens(i,j,k,ie) + nu_scale_top*nu_top*lap_t(i,j) )
-                dptens(i,j,k,ie)  = (-nu_p*dptens(i,j,k,ie) + nu_scale_top*nu_top*lap_dp(i,j) )
-                vtens(i,j,1,k,ie) = (-nu*vtens(i,j,1,k,ie) + nu_scale_top*nu_top*lap_v(i,j,1))
-                vtens(i,j,2,k,ie) = (-nu*vtens(i,j,2,k,ie) + nu_scale_top*nu_top*lap_v(i,j,2))
-              enddo
+          !OMP_COLLAPSE_SIMD
+          !DIR_VECTOR_ALIGNED
+          do j=1,np
+            do i=1,np
+              ttens(i,j,k,ie)   = -nu_s*ttens(i,j,k,ie)
+              dptens(i,j,k,ie)  = -nu_p*dptens(i,j,k,ie)
+              vtens(i,j,1,k,ie) = -nu*vtens(i,j,1,k,ie)
+              vtens(i,j,2,k,ie) = -nu*vtens(i,j,2,k,ie)
             enddo
-          else
-            !OMP_COLLAPSE_SIMD
-            !DIR_VECTOR_ALIGNED
-            do j=1,np
-              do i=1,np
-                ttens(i,j,k,ie)   = -nu_s*ttens(i,j,k,ie)
-                dptens(i,j,k,ie)  = -nu_p*dptens(i,j,k,ie)
-                vtens(i,j,1,k,ie) = -nu*vtens(i,j,1,k,ie)
-                vtens(i,j,2,k,ie) = -nu*vtens(i,j,2,k,ie)
-              enddo
-            enddo
-          endif
+          enddo
           
           if (ntrac>0) then
             !OMP_COLLAPSE_SIMD
             !DIR_VECTOR_ALIGNED
             do j=1,nc
               do i=1,nc
+                !
+                ! del4 mass flux for CSLAM
+                !
                 elem(ie)%sub_elem_mass_flux(i,j,:,k) = elem(ie)%sub_elem_mass_flux(i,j,:,k) - &
                      rhypervis_subcycle*eta_ave_w*nu_p*dpflux(i,j,:,k,ie)
               enddo
             enddo
-            if (nu_top>0 .and. k<=3) then
-              call subcell_Laplace_fluxes(elem(ie)%state%dp3d(:,:,k,nt),deriv,elem(ie),np,nc,laplace_fluxes)
-              elem(ie)%sub_elem_mass_flux(:,:,:,k) = elem(ie)%sub_elem_mass_flux(:,:,:,k) + &
-                   rhypervis_subcycle*eta_ave_w*nu_scale_top*nu_top*laplace_fluxes
-            endif
           endif
           
           ! NOTE: we will DSS all tendicies, EXCEPT for dp3d, where we DSS the new state
@@ -694,7 +720,7 @@ contains
         endif
         
         ! apply inverse mass matrix, accumulate tendencies
-        !$omp parallel do num_threads(vert_num_threads)
+        !$omp parallel do num_threads(vert_num_threads) private(k,i,j)
         do k=kbeg,kend
           !OMP_COLLAPSE_SIMD
           !DIR_VECTOR_ALIGNED
@@ -730,7 +756,7 @@ contains
         enddo
       end do
       
-      call calc_tot_energy_dynamics(elem,nets,nete,nt,qn0,'dCH')
+      call calc_tot_energy_dynamics(elem,fvm,nets,nete,nt,qn0,'dCH')
       do ie=nets,nete
         !$omp parallel do num_threads(vert_num_threads), private(k,i,j,v1,v2,heating)
         do k=kbeg,kend
@@ -747,13 +773,293 @@ contains
           enddo
         enddo
       enddo
-      
-      call calc_tot_energy_dynamics(elem,nets,nete,nt,qn0,'dAH')
-    enddo
+    end do
+    call calc_tot_energy_dynamics(elem,fvm,nets,nete,nt,qn0,'dAH')
+    !
+    !***************************************************************
+    !
+    ! sponge layer damping
+    !
+    !***************************************************************
+    !
+    dt=dt2/hypervis_subcycle_sponge
+    call calc_tot_energy_dynamics(elem,fvm,nets,nete,nt,qn0,'dBS')
+    if (nu_top>0) then
+      kblk = ksponge_end    
+      do ic=1,hypervis_subcycle_sponge      
+        rhypervis_subcycle=1.0_r8/real(hypervis_subcycle_sponge,kind=r8)
+        do ie=nets,nete
+          do k=1,ksponge_end
+            call laplace_sphere_wk(elem(ie)%state%T(:,:,k,nt),deriv,elem(ie),lap_t,var_coef=.false.)
+            call laplace_sphere_wk(elem(ie)%state%dp3d(:,:,k,nt),deriv,elem(ie),lap_dp,var_coef=.false.)
+            ! increased second-order divergence damping
+            nu_ratio1=1.0_r8
+            call vlaplace_sphere_wk(elem(ie)%state%v(:,:,:,k,nt),deriv,elem(ie),lap_v, var_coef=.false.,&
+                 nu_ratio=nu_ratio1)
+            
+            !OMP_COLLAPSE_SIMD
+            !DIR_VECTOR_ALIGNED
+            do j=1,np
+              do i=1,np
+                ttens(i,j,k,ie)   = nu_scale_top(k)*nu_top*lap_t(i,j)  
+                dptens(i,j,k,ie)  = nu_scale_top(k)*nu_top*lap_dp(i,j) 
+                vtens(i,j,1,k,ie) = nu_scale_top(k)*nu_top*lap_v(i,j,1)
+                vtens(i,j,2,k,ie) = nu_scale_top(k)*nu_top*lap_v(i,j,2)
+              enddo
+            enddo
+            
+            if (ntrac>0) then
+              !
+              ! del2 mass flux for CSLAM (note that we do not have del4 in sponge layer)
+              !
+              call subcell_Laplace_fluxes(elem(ie)%state%dp3d(:,:,k,nt),deriv,elem(ie),np,nc,laplace_fluxes)
+              elem(ie)%sub_elem_mass_flux(:,:,:,k) = elem(ie)%sub_elem_mass_flux(:,:,:,k) + &
+                   rhypervis_subcycle*eta_ave_w*nu_scale_top(k)*nu_top*laplace_fluxes
+            endif
+            
+            ! NOTE: we will DSS all tendicies, EXCEPT for dp3d, where we DSS the new state
+            !OMP_COLLAPSE_SIMD
+            !DIR_VECTOR_ALIGNED
+            do j=1,np
+              do i=1,np
+                elem(ie)%state%dp3d(i,j,k,nt) = elem(ie)%state%dp3d(i,j,k,nt)*elem(ie)%spheremp(i,j)&
+                     + dt*dptens(i,j,k,ie)
+              enddo
+            enddo
+            
+          enddo
+          
+          
+          kptr = 0
+          call edgeVpack(edgeSponge,ttens(:,:,1:ksponge_end,ie),kblk,kptr,ie)
+          
+          kptr = ksponge_end
+          call edgeVpack(edgeSponge,vtens(:,:,1,1:ksponge_end,ie),kblk,kptr,ie)
+          
+          kptr = 2*ksponge_end
+          call edgeVpack(edgeSponge,vtens(:,:,2,1:ksponge_end,ie),kblk,kptr,ie)
+          
+          kptr = 3*ksponge_end        
+          call edgeVpack(edgeSponge,elem(ie)%state%dp3d(:,:,1:ksponge_end,nt),kblk,kptr,ie)
+        enddo
+        
+        call bndry_exchange(hybrid,edgeSponge,location='advance_hypervis_sponge')
+        
+        do ie=nets,nete
+          
+          kptr = 0
+          call edgeVunpack(edgeSponge,ttens(:,:,1:ksponge_end,ie),kblk,kptr,ie)
+          
+          kptr = ksponge_end        
+          call edgeVunpack(edgeSponge,vtens(:,:,1,1:ksponge_end,ie),kblk,kptr,ie)
+          
+          kptr = 2*ksponge_end        
+          call edgeVunpack(edgeSponge,vtens(:,:,2,1:ksponge_end,ie),kblk,kptr,ie)
+          
+          if (ntrac>0) then
+            do k=1,ksponge_end
+              temp(:,:,k) = elem(ie)%state%dp3d(:,:,k,nt) / elem(ie)%spheremp  ! STATE before DSS
+              corners(0:np+1,0:np+1,k) = 0.0_r8
+              corners(1:np  ,1:np  ,k) = elem(ie)%state%dp3d(1:np,1:np,k,nt) ! fill in interior data of STATE*mass
+            enddo
+          endif
+          kptr = 3*ksponge_end                
+          call edgeVunpack(edgeSponge,elem(ie)%state%dp3d(:,:,1:ksponge_end,nt),kblk,kptr,ie)        
+          
+          if (ntrac>0) then
+            desc = elem(ie)%desc
+            
+            kptr = 3*ksponge_end                          
+            call edgeDGVunpack(edgeSponge,corners(:,:,1:ksponge_end),kblk,kptr,ie)
+            do k=1,ksponge_end
+              corners(:,:,k) = corners(:,:,k)/dt !note: array size is 0:np+1
+              !OMP_COLLAPSE_SIMD
+              !DIR_VECTOR_ALIGNED
+              do j=1,np
+                do i=1,np
+                  temp(i,j,k) =  elem(ie)%rspheremp(i,j)*elem(ie)%state%dp3d(i,j,k,nt) - temp(i,j,k)
+                  temp(i,j,k) =  temp(i,j,k)/dt
+                enddo
+              enddo
+              
+              call distribute_flux_at_corners(cflux, corners(:,:,k), desc%getmapP)
+              
+              cflux(1,1,:)   = elem(ie)%rspheremp(1,  1) * cflux(1,1,:)
+              cflux(2,1,:)   = elem(ie)%rspheremp(np, 1) * cflux(2,1,:)
+              cflux(1,2,:)   = elem(ie)%rspheremp(1, np) * cflux(1,2,:)
+              cflux(2,2,:)   = elem(ie)%rspheremp(np,np) * cflux(2,2,:)
+              
+              call subcell_dss_fluxes(temp(:,:,k), np, nc, elem(ie)%metdet,cflux,tempflux)
+              elem(ie)%sub_elem_mass_flux(:,:,:,k) = elem(ie)%sub_elem_mass_flux(:,:,:,k) + &
+                   rhypervis_subcycle*eta_ave_w*tempflux
+            end do
+          endif
+          
+          ! apply inverse mass matrix, accumulate tendencies
+          !$omp parallel do num_threads(vert_num_threads) private(k,i,j)
+          do k=1,ksponge_end
+            !OMP_COLLAPSE_SIMD
+            !DIR_VECTOR_ALIGNED
+            do j=1,np
+              do i=1,np
+                vtens(i,j,1,k,ie)=dt*vtens(i,j,1,k,ie)*elem(ie)%rspheremp(i,j)
+                vtens(i,j,2,k,ie)=dt*vtens(i,j,2,k,ie)*elem(ie)%rspheremp(i,j)
+                ttens(i,j,k,ie)=dt*ttens(i,j,k,ie)*elem(ie)%rspheremp(i,j)
+                elem(ie)%state%dp3d(i,j,k,nt)=elem(ie)%state%dp3d(i,j,k,nt)*elem(ie)%rspheremp(i,j)
+              enddo
+            enddo
+          enddo
+          !$omp parallel do num_threads(vert_num_threads) private(k,i,j)
+          do k=1,ksponge_end
+            !OMP_COLLAPSE_SIMD
+            !DIR_VECTOR_ALIGNED
+            do j=1,np
+              do i=1,np
+                ! update v first (gives better results than updating v after heating)
+                elem(ie)%state%v(i,j,:,k,nt)=elem(ie)%state%v(i,j,:,k,nt) + &
+                     vtens(i,j,:,k,ie)
+                elem(ie)%state%T(i,j,k,nt)=elem(ie)%state%T(i,j,k,nt) &
+                     +ttens(i,j,k,ie)
+              enddo
+            enddo
+          enddo
+        end do
+      end do
+    end if
+    call calc_tot_energy_dynamics(elem,fvm,nets,nete,nt,qn0,'dAS')        
+  end subroutine advance_hypervis_dp
 
-    call t_stopf('advance_hypervis_dp')
-   end subroutine advance_hypervis_dp
-   
+  subroutine del2_sponge_uvt_tendencies(elem,hybrid,deriv,nets,nete,dt_phys)
+    !
+    !  take one timestep of:
+    !          u(:,:,:,np) = u(:,:,:,np) +  dt2*nu*laplacian**order ( u )
+    !          T(:,:,:,np) = T(:,:,:,np) +  dt2*nu_s*laplacian**order ( T )
+    !
+    !
+    !  For correct scaling, dt2 should be the same 'dt2' used in the leapfrog advace
+    !
+    !
+    use dimensions_mod, only: np, nlev, nc, ntrac
+    use dimensions_mod, only: nu_scale_top,ksponge_end
+    use control_mod,    only: nu, nu_s, hypervis_subcycle_sponge, nu_p, nu_top, hypervis_scaling
+    use hybrid_mod,     only: hybrid_t!, get_loop_ranges
+    use element_mod,    only: element_t
+    use derivative_mod, only: derivative_t, laplace_sphere_wk, vlaplace_sphere_wk
+    use edge_mod,       only: edgevpack, edgevunpack, edgeDGVunpack
+    use edgetype_mod,   only: EdgeBuffer_t, EdgeDescriptor_t
+    use bndry_mod,      only: bndry_exchange
+    use viscosity_mod,  only: biharmonic_wk_dp3d
+    
+    type (hybrid_t)    , intent(in)   :: hybrid
+    type (element_t)   , intent(inout), target :: elem(:)
+    type (derivative_t), intent(in  ) :: deriv
+    integer            , intent(in)   :: nets,nete
+    real (kind=r8)     , intent(in)   :: dt_phys
+
+    ! local
+    integer :: k,kptr,i,j,ie,ic
+    integer :: kbeg, kend, kblk
+    real (kind=r8), dimension(np,np,2,nlev,nets:nete)      :: vtens
+    real (kind=r8), dimension(np,np,nlev,nets:nete)        :: ttens
+    type (EdgeDescriptor_t)                                :: desc    
+    
+    real (kind=r8), dimension(np,np)   :: lap_t
+    real (kind=r8), dimension(np,np,2) :: lap_v
+    real (kind=r8)                     :: dt
+    real (kind=r8)                     :: nu_ratio1
+
+    kbeg=1; kend=nlev
+    
+    kblk = kend - kbeg + 1
+
+    dt=dt_phys/hypervis_subcycle_sponge
+    
+    !
+    !***************************************************************
+    !
+    ! sponge layer damping
+    !
+    !***************************************************************
+    !
+    kblk = ksponge_end    
+    do ic=1,hypervis_subcycle_sponge
+      do ie=nets,nete
+        do k=1,ksponge_end
+          call laplace_sphere_wk(elem(ie)%derived%FT(:,:,k),deriv,elem(ie),lap_t,var_coef=.false.)
+          ! increased second-order divergence damping
+          nu_ratio1=1.0_r8
+          call vlaplace_sphere_wk(elem(ie)%derived%FM(:,:,:,k),deriv,elem(ie),lap_v, var_coef=.false.,&
+               nu_ratio=nu_ratio1)
+          
+          !OMP_COLLAPSE_SIMD
+          !DIR_VECTOR_ALIGNED
+          do j=1,np
+            do i=1,np
+              ttens(i,j,k,ie)   = nu_scale_top(k)*nu_top*lap_t(i,j)*0.1_r8
+              vtens(i,j,1,k,ie) = nu_scale_top(k)*nu_top*lap_v(i,j,1)*0.1_r8
+              vtens(i,j,2,k,ie) = nu_scale_top(k)*nu_top*lap_v(i,j,2)*0.1_r8
+            enddo
+          enddo
+        enddo
+        
+        
+        kptr = 0
+        call edgeVpack(edgeSponge,ttens(:,:,1:ksponge_end,ie),kblk,kptr,ie)
+        
+        kptr = ksponge_end
+        call edgeVpack(edgeSponge,vtens(:,:,1,1:ksponge_end,ie),kblk,kptr,ie)
+        
+        kptr = 2*ksponge_end
+        call edgeVpack(edgeSponge,vtens(:,:,2,1:ksponge_end,ie),kblk,kptr,ie)
+      enddo
+      
+      call bndry_exchange(hybrid,edgeSponge,location='advance_hypervis_fsponge')
+      
+      do ie=nets,nete
+        
+        kptr = 0
+        call edgeVunpack(edgeSponge,ttens(:,:,1:ksponge_end,ie),kblk,kptr,ie)
+
+        kptr = ksponge_end        
+        call edgeVunpack(edgeSponge,vtens(:,:,1,1:ksponge_end,ie),kblk,kptr,ie)
+
+        kptr = 2*ksponge_end        
+        call edgeVunpack(edgeSponge,vtens(:,:,2,1:ksponge_end,ie),kblk,kptr,ie)
+        
+
+        ! apply inverse mass matrix, accumulate tendencies
+        !$omp parallel do num_threads(vert_num_threads) private(k,i,j)
+        do k=1,ksponge_end
+          !OMP_COLLAPSE_SIMD
+          !DIR_VECTOR_ALIGNED
+          do j=1,np
+            do i=1,np
+              vtens(i,j,1,k,ie)=dt*vtens(i,j,1,k,ie)*elem(ie)%rspheremp(i,j)
+              vtens(i,j,2,k,ie)=dt*vtens(i,j,2,k,ie)*elem(ie)%rspheremp(i,j)
+              ttens(i,j,k,ie)=dt*ttens(i,j,k,ie)*elem(ie)%rspheremp(i,j)
+            enddo
+          enddo
+        enddo
+        !$omp parallel do num_threads(vert_num_threads) private(k,i,j)
+        do k=1,ksponge_end
+          !OMP_COLLAPSE_SIMD
+          !DIR_VECTOR_ALIGNED
+          do j=1,np
+            do i=1,np
+              ! update v first (gives better results than updating v after heating)
+              elem(ie)%derived%FM(i,j,:,k)=elem(ie)%derived%FM(i,j,:,k) + &
+                   vtens(i,j,:,k,ie)
+              elem(ie)%derived%FT(i,j,k)=elem(ie)%derived%FT(i,j,k) &
+                   +ttens(i,j,k,ie)
+            enddo
+          enddo
+        enddo
+      end do       
+    end do
+  end subroutine del2_sponge_uvt_tendencies
+
+
+  
    subroutine compute_and_apply_rhs(np1,nm1,n0,dt2,elem,hvcoord,hybrid,&
         deriv,nets,nete,eta_ave_w,inv_cp_full,qwater)
      ! ===================================
@@ -780,7 +1086,7 @@ contains
      !
      ! ===================================
      use dimensions_mod,  only: np, nc, nlev
-     use dimensions_mod,  only: qsize_condensate_loading, ntrac
+     use dimensions_mod,  only: qsize_condensate_loading, qsize_condensate_loading_R, ntrac
      use hybrid_mod,      only: hybrid_t
      use element_mod,     only: element_t
      use derivative_mod,  only: derivative_t, divergence_sphere, gradient_sphere, vorticity_sphere
@@ -789,7 +1095,7 @@ contains
      use edgetype_mod,    only: edgedescriptor_t
      use bndry_mod,       only: bndry_exchange
      use hybvcoord_mod,   only: hvcoord_t
-     use physconst,       only: rair, epsilo
+     use physconst,       only: rair, epsilo, cappa, cpair
      use prim_si_mod,     only: preq_hydrostatic
      use control_mod,     only: se_met_nudge_u, se_met_nudge_p, se_met_nudge_t, se_met_tevolve
      
@@ -833,7 +1139,10 @@ contains
      real (kind=r8) :: vtens1(np,np,nlev),vtens2(np,np,nlev),ttens(np,np,nlev)
      real (kind=r8) :: stashdp3d (np,np,nlev),tempdp3d(np,np), tempflux(nc,nc,4)
      real (kind=r8) :: inv_epsilon, ckk, term, T_v(np,np,nlev)
-     
+     real (kind=r8), dimension(np,np,2) :: grad_exner
+     real (kind=r8), dimension(np,np)   :: theta_v
+
+     real (kind=r8), dimension(np,np)   :: exner
      type (EdgeDescriptor_t):: desc
      
      real (kind=r8) :: sum_water(np,np,nlev), density_inv
@@ -846,7 +1155,6 @@ contains
      call t_adj_detailf(+1)
      call t_startf('compute_and_apply_rhs')
      do ie=nets,nete
-       !ps => elem(ie)%state%psdry(:,:,n0)
        phi => elem(ie)%derived%phi(:,:,:)
        
        ! ==================================================
@@ -882,11 +1190,21 @@ contains
          do nq=1,qsize_condensate_loading
            sum_water(:,:,k) = sum_water(:,:,k) + qwater(:,:,k,nq,ie)
          end do
-         do j=1,np
-           do i=1,np
-             t_v(i,j,k)  = elem(ie)%state%T(i,j,k,n0)*(1+inv_epsilon*qwater(i,j,k,1,ie))/sum_water(i,j,k)
+
+         t_v(:,:,k)  = Rair*elem(ie)%state%T(:,:,k,n0)
+         do nq=1,qsize_condensate_loading
+           do j=1,np
+             do i=1,np
+               t_v(i,j,k)  = t_v(i,j,k)+elem(ie)%state%T(i,j,k,n0)*qsize_condensate_loading_R(nq)*qwater(i,j,k,nq,ie)
+             end do
            end do
          end do
+         do j=1,np
+           do i=1,np
+             t_v(i,j,k)  = t_v(i,j,k)/(Rair*sum_water(i,j,k))
+           end do
+         end do
+
          !
          ! convert to gas pressure (dry + water vapor pressure)
          ! (assumes T and q are constant in the layer)
@@ -947,10 +1265,6 @@ contains
        enddo
        
        ! compute T_v for timelevel n0
-#if (defined COLUMN_OPENMP)
-!$omp parallel do private(k,i,j)
-#endif
-       !
        ! ====================================================
        ! Compute Hydrostatic equation, modelled after CCM-3
        ! ====================================================
@@ -958,11 +1272,11 @@ contains
        ! ====================================================
        ! Compute omega_full
        ! ====================================================
-#if (defined COLUMN_OPENMP)
-!$omp parallel do private(k,j,i,ckk,term)
-#endif
        ckk         = 0.5_r8
        suml(:,:  ) = 0
+#if (defined COLUMN_OPENMP)
+!$omp parallel do num_threads(vert_num_threads) private(k,j,i,ckk,term)
+#endif
        do k=1,nlev
         !OMP_COLLAPSE_SIMD 
         !DIR_VECTOR_ALIGNED
@@ -979,7 +1293,7 @@ contains
          end do
        end do       
 #if (defined COLUMN_OPENMP)
-     !$omp parallel do private(k)
+     !$omp parallel do num_threads(vert_num_threads) private(k)
 #endif
        do k=1,nlev  !  Loop index added (AAM)
          elem(ie)%derived%omega(:,:,k) = &
@@ -989,7 +1303,7 @@ contains
        ! Compute phi + kinetic energy term: 10*nv*nv Flops
        ! ==============================================
 #if (defined COLUMN_OPENMP)
-!$omp parallel do private(k,i,j,v1,v2,E,Ephi,vtemp,vgrad_T,gpterm,glnps1,glnps2)
+!$omp parallel do num_threads(vert_num_threads) private(k,i,j,v1,v2,E,Ephi,vtemp,vgrad_T,gpterm,glnps1,glnps2)
 #endif
        vertloop: do k=1,nlev
         !OMP_COLLAPSE_SIMD 
@@ -1020,14 +1334,19 @@ contains
          ! vtemp = grad ( E + PHI )
          ! vtemp = gradient_sphere(Ephi(:,:),deriv,elem(ie)%Dinv)
          call gradient_sphere(Ephi(:,:),deriv,elem(ie)%Dinv,vtemp)
-         
+
+         exner(:,:)=(p_full(:,:,k)/hvcoord%ps0)**cappa
+         theta_v(:,:)=T_v(:,:,k)/exner(:,:)
+         call gradient_sphere(exner(:,:),deriv,elem(ie)%Dinv,grad_exner(:,:,:))
+
          do j=1,np
            do i=1,np
              density_inv = Rair*T_v(i,j,k)/p_full(i,j,k)
-             
-             glnps1  = density_inv*grad_p_full(i,j,1,k)
-             glnps2  = density_inv*grad_p_full(i,j,2,k)
-             
+
+             glnps1 = cpair*theta_v(i,j)*grad_exner(i,j,1)
+             glnps2 = cpair*theta_v(i,j)*grad_exner(i,j,2)
+!             glnps1  = density_inv*grad_p_full(i,j,1,k)
+!             glnps2  = density_inv*grad_p_full(i,j,2,k)
              v1     = elem(ie)%state%v(i,j,1,k,n0)
              v2     = elem(ie)%state%v(i,j,2,k,n0)
              
@@ -1092,7 +1411,7 @@ contains
        ! apply mass matrix
        ! =========================================================
 #if (defined COLUMN_OPENMP)
-!$omp parallel do private(k)
+!$omp parallel do num_threads(vert_num_threads) private(k)
 #endif
        do k=1,nlev
          !OMP_COLLAPSE_SIMD 
@@ -1122,51 +1441,35 @@ contains
            elem(ie)%sub_elem_mass_flux(:,:,:,k) = elem(ie)%sub_elem_mass_flux(:,:,:,k) - eta_ave_w*tempflux
          end if
        enddo
-       !OMP_COLLAPSE_SIMD 
-       !DIR_VECTOR_ALIGNED
-       do j=1,np
-         do i=1,np
-           elem(ie)%state%psdry(i,j,np1) = elem(ie)%spheremp(i,j)*( elem(ie)%state%psdry(i,j,nm1))
-         enddo
-       enddo
-       
-       
-       
        ! =========================================================
        !
        ! Pack 
        !
        ! =========================================================
        kptr=0
-       call edgeVpack(edge3p1, elem(ie)%state%psdry(:,:,np1),1,kptr,ie)
+       call edgeVpack(edge3, elem(ie)%state%T(:,:,:,np1),nlev,kptr,ie)
        
-       kptr=1
-       call edgeVpack(edge3p1, elem(ie)%state%T(:,:,:,np1),nlev,kptr,ie)
-       
-       kptr=nlev+1
-       call edgeVpack(edge3p1, elem(ie)%state%v(:,:,:,:,np1),2*nlev,kptr,ie)
+       kptr=nlev
+       call edgeVpack(edge3, elem(ie)%state%v(:,:,:,:,np1),2*nlev,kptr,ie)
        
        kptr=kptr+2*nlev
-       call edgeVpack(edge3p1, elem(ie)%state%dp3d(:,:,:,np1),nlev,kptr, ie)
+       call edgeVpack(edge3, elem(ie)%state%dp3d(:,:,:,np1),nlev,kptr, ie)
      end do
      
      ! =============================================================
      ! Insert communications here: for shared memory, just a single
      ! sync is required
      ! =============================================================
-     call bndry_exchange(hybrid,edge3p1)
+     call bndry_exchange(hybrid,edge3,location='edge3')
      do ie=nets,nete
        ! ===========================================================
        ! Unpack the edges for vgrad_T and v tendencies...
        ! ===========================================================
        kptr=0
-       call edgeVunpack(edge3p1, elem(ie)%state%psdry(:,:,np1), 1, kptr, ie)
+       call edgeVunpack(edge3, elem(ie)%state%T(:,:,:,np1), nlev, kptr, ie)
        
-       kptr=1
-       call edgeVunpack(edge3p1, elem(ie)%state%T(:,:,:,np1), nlev, kptr, ie)
-       
-       kptr=nlev+1
-       call edgeVunpack(edge3p1, elem(ie)%state%v(:,:,:,:,np1), 2*nlev, kptr, ie)
+       kptr=nlev
+       call edgeVunpack(edge3, elem(ie)%state%v(:,:,:,:,np1), 2*nlev, kptr, ie)
        
        if (ntrac>0.and.eta_ave_w.ne.0._r8) then
          do k=1,nlev
@@ -1177,12 +1480,12 @@ contains
        corners = 0.0_r8
        corners(1:np,1:np,:) = elem(ie)%state%dp3d(:,:,:,np1)
        kptr=kptr+2*nlev
-       call edgeVunpack(edge3p1, elem(ie)%state%dp3d(:,:,:,np1),nlev,kptr,ie)
+       call edgeVunpack(edge3, elem(ie)%state%dp3d(:,:,:,np1),nlev,kptr,ie)
        
        if  (ntrac>0.and.eta_ave_w.ne.0._r8) then
          desc = elem(ie)%desc
 
-         call edgeDGVunpack(edge3p1, corners, nlev, kptr, ie)
+         call edgeDGVunpack(edge3, corners, nlev, kptr, ie)
 
          corners = corners/dt2
          
@@ -1208,7 +1511,7 @@ contains
        ! ====================================================
        
 #if (defined COLUMN_OPENMP)
-!$omp parallel do private(k)
+!$omp parallel do num_threads(vert_num_threads) private(k)
 #endif
        do k=1,nlev
          !OMP_COLLAPSE_SIMD 
@@ -1228,11 +1531,6 @@ contains
        enddo
      end do
 
-#ifdef DEBUGOMP
-#if (defined HORIZ_OPENMP)
-!$OMP BARRIER
-#endif
-#endif
      call t_stopf('compute_and_apply_rhs')
      call t_adj_detailf(-1)
    end subroutine compute_and_apply_rhs
@@ -1304,8 +1602,8 @@ contains
    end subroutine distribute_flux_at_corners
 
 
-  subroutine calc_tot_energy_dynamics(elem,nets,nete,tl,tl_qdp,outfld_name_suffix)
-    use dimensions_mod,         only: npsq,nlev,np,lcp_moist
+  subroutine calc_tot_energy_dynamics(elem,fvm,nets,nete,tl,tl_qdp,outfld_name_suffix)
+    use dimensions_mod,         only: npsq,nlev,np,lcp_moist,nc,ntrac
     use dimensions_mod,         only: qsize_condensate_loading, qsize_condensate_loading_cp
     use dimensions_mod,         only: qsize_condensate_loading_idx_gll
     use physconst,              only: gravit, cpair, rearth,omega
@@ -1313,29 +1611,22 @@ contains
     use cam_history,            only: outfld, hist_fld_active
     use constituents,           only: cnst_get_ind
     use hycoef,                 only: hyai, ps0
-!    use fvm_control_volume_mod, only: fvm_struct
-    use control_mod,            only: TRACERTRANSPORT_SE_GLL, tracer_transport_type
-
+    use fvm_control_volume_mod, only: fvm_struct
     !------------------------------Arguments--------------------------------
     
     type (element_t) , intent(in) :: elem(:)
-    integer          , intent(in) :: tl, tl_qdp,nets,nete!, n_fvm
+    type(fvm_struct) , intent(in) :: fvm(:)
+    integer          , intent(in) :: tl, tl_qdp,nets,nete
     character*(*)    , intent(in) :: outfld_name_suffix ! suffix for "outfld" names
     
     !---------------------------Local storage-------------------------------
     
     real(kind=r8) :: se(npsq)                          ! Dry Static energy (J/m2)
     real(kind=r8) :: ke(npsq)                          ! kinetic energy    (J/m2)
-    real(kind=r8) :: wv(npsq)                          ! column integrated vapor       (kg/m2)
-    real(kind=r8) :: wl(npsq)                          ! column integrated liquid      (kg/m2)
-    real(kind=r8) :: wi(npsq)                          ! column integrated ice         (kg/m2)
-    real(kind=r8) :: tt(npsq)                          ! column integrated test tracer (kg/m2)
+
+    real(kind=r8) :: cdp_fvm(nc,nc,nlev)
     real(kind=r8) :: se_tmp
     real(kind=r8) :: ke_tmp
-    real(kind=r8) :: wv_tmp
-    real(kind=r8) :: wl_tmp
-    real(kind=r8) :: wi_tmp
-    real(kind=r8) :: tt_tmp
     real(kind=r8) :: ps(np,np)
     real(kind=r8) :: pdel
     !
@@ -1349,7 +1640,7 @@ contains
     real(kind=r8) :: mr_cnst, mo_cnst, cos_lat, mr_tmp, mo_tmp
 
     integer :: ie,i,j,k,nq,m_cnst
-    integer :: ixcldice, ixcldliq, ixtt ! CLDICE, CLDLIQ and test tracer indices
+    integer :: ixwv,ixcldice, ixcldliq, ixtt ! CLDICE, CLDLIQ and test tracer indices
     character(len=16) :: name_out1,name_out2,name_out3,name_out4,name_out5,name_out6
 
     !-----------------------------------------------------------------------
@@ -1363,28 +1654,26 @@ contains
 
     if ( hist_fld_active(name_out1).or.hist_fld_active(name_out2).or.hist_fld_active(name_out3).or.&
          hist_fld_active(name_out4).or.hist_fld_active(name_out5).or.hist_fld_active(name_out6)) then
-      if (qsize_condensate_loading>1) then
+
+      if (ntrac>0) then
+        ixwv = 1
+        call cnst_get_ind('CLDLIQ' , ixcldliq, abort=.false.)
+        call cnst_get_ind('CLDICE' , ixcldice, abort=.false.)
+      else
+        !
+        ! when using CSLAM the condensates on the GLL grid may be located in a different index than in physics
+        !
+        ixwv = -1!to avoid compiletime error in code below
         ixcldliq = qsize_condensate_loading_idx_gll(2)
         ixcldice = qsize_condensate_loading_idx_gll(3)
-      else
-        ixcldliq = -1
-        ixcldice = -1
       end if
-      if (tracer_transport_type == TRACERTRANSPORT_SE_GLL) then
-        call cnst_get_ind('TT_LW' , ixtt    , abort=.false.)
-      else
-        ixtt = -1
-      end if
+      call cnst_get_ind('TT_LW' , ixtt    , abort=.false.)
       !
       ! Compute frozen static energy in 3 parts:  KE, SE, and energy associated with vapor and liquid
       !
       do ie=nets,nete
         se    = 0.0_r8
         ke    = 0.0_r8
-        wv    = 0.0_r8
-        wl    = 0.0_r8
-        wi    = 0.0_r8
-        tt    = 0.0_r8
 
         ps(:,:)    = hyai(1)*ps0
         do k = 1, nlev
@@ -1415,12 +1704,9 @@ contains
                 ! using CAM physics definition of internal energy
                 !
                 se_tmp   = cpair*elem(ie)%state%T(i,j,k,tl)*pdel/gravit
-              end if
-              wv_tmp   =  elem(ie)%state%qdp(i,j,k,1,tl_qdp)/gravit
-              
+              end if              
               se   (i+(j-1)*np) = se   (i+(j-1)*np) + se_tmp
               ke   (i+(j-1)*np) = ke   (i+(j-1)*np) + ke_tmp
-              wv   (i+(j-1)*np) = wv   (i+(j-1)*np) + wv_tmp
             end do
           end do
         end do
@@ -1430,49 +1716,37 @@ contains
             se(i+(j-1)*np) = se(i+(j-1)*np) + elem(ie)%state%phis(i,j)*ps(i,j)/gravit
           end do
         end do
-
-        ! Don't require cloud liq/ice to be present.  Allows for adiabatic/ideal phys.
-
-        if (ixcldliq > 1) then
-          do k = 1, nlev
-            do j = 1, np
-              do i = 1, np
-                wl_tmp   = elem(ie)%state%qdp(i,j,k,ixcldliq,tl_qdp)/gravit
-                wl   (i+(j-1)*np) = wl(i+(j-1)*np) + wl_tmp
-              end do
-            end do
-          end do
-        end if
-
-        if (ixcldice > 1) then
-          do k = 1, nlev
-            do j = 1, np
-              do i = 1, np
-                wi_tmp   = elem(ie)%state%qdp(i,j,k,ixcldice,tl_qdp)/gravit
-                wi(i+(j-1)*np)    = wi(i+(j-1)*np) + wi_tmp
-              end do
-            end do
-          end do
-        end if
-
-        if (ixtt > 1) then
-          do k = 1, nlev
-            do j = 1, np
-              do i = 1, np
-                tt_tmp   = elem(ie)%state%qdp(i,j,k,ixtt,tl_qdp)/gravit
-                tt   (i+(j-1)*np) = tt(i+(j-1)*np) + tt_tmp
-              end do
-            end do
-          end do
-        end if
-
-        ! Output energy diagnostics
+        !
+        ! Output energy diagnostics on GLL grid
+        !
         call outfld(name_out1  ,se       ,npsq,ie)
         call outfld(name_out2  ,ke       ,npsq,ie)
-        call outfld(name_out3  ,wv       ,npsq,ie)
-        call outfld(name_out4  ,wl       ,npsq,ie)
-        call outfld(name_out5  ,wi       ,npsq,ie)
-        call outfld(name_out6  ,tt       ,npsq,ie)
+        !
+        ! mass variables are output on CSLAM grid if using CSLAM else GLL grid
+        !
+        if (ntrac>0) then
+          if (ixwv>0) then
+            cdp_fvm = fvm(ie)%c(1:nc,1:nc,:,ixwv)*fvm(ie)%dp_fvm(1:nc,1:nc,:)
+            call util_function(cdp_fvm,nc,nlev,name_out3,ie)
+          end if
+          if (ixcldliq>0) then
+            cdp_fvm = fvm(ie)%c(1:nc,1:nc,:,ixcldliq)*fvm(ie)%dp_fvm(1:nc,1:nc,:)
+            call util_function(cdp_fvm,nc,nlev,name_out4,ie)
+          end if
+          if (ixcldice>0) then
+            cdp_fvm = fvm(ie)%c(1:nc,1:nc,:,ixcldice)*fvm(ie)%dp_fvm(1:nc,1:nc,:) 
+            call util_function(cdp_fvm,nc,nlev,name_out5,ie)
+          end if
+          if (ixtt>0) then
+            cdp_fvm = fvm(ie)%c(1:nc,1:nc,:,ixtt)*fvm(ie)%dp_fvm(1:nc,1:nc,:)
+            call util_function(cdp_fvm,nc,nlev,name_out6,ie)                        
+          end if
+        else
+          call util_function(elem(ie)%state%qdp(:,:,:,1       ,tl_qdp),np,nlev,name_out3,ie)
+          if (ixcldliq>0) call util_function(elem(ie)%state%qdp(:,:,:,ixcldliq,tl_qdp),np,nlev,name_out4,ie)
+          if (ixcldice>0) call util_function(elem(ie)%state%qdp(:,:,:,ixcldice,tl_qdp),np,nlev,name_out5,ie)
+          if (ixtt>0    ) call util_function(elem(ie)%state%qdp(:,:,:,ixtt    ,tl_qdp),np,nlev,name_out6,ie)
+        end if
       end do
     end if
     !
@@ -1530,107 +1804,76 @@ contains
 
   end subroutine calc_tot_energy_dynamics
 
-  subroutine output_qdp_var_dynamics(qdp,nets,nete,outfld_name)
-    use dimensions_mod, only: npsq,qsize,nlev,np,nelemd
+
+  subroutine output_qdp_var_dynamics(qdp,nx,num_trac,nets,nete,outfld_name)
+    use dimensions_mod, only: nlev,ntrac,nelemd
     use physconst     , only: gravit
     use cam_history   , only: outfld, hist_fld_active
     use constituents  , only: cnst_get_ind
     use control_mod,    only: TRACERTRANSPORT_SE_GLL, tracer_transport_type
     use dimensions_mod, only: qsize_condensate_loading,qsize_condensate_loading_idx_gll
+    use dimensions_mod, only: qsize_condensate_loading_idx
     !------------------------------Arguments--------------------------------
 
-    real(kind=r8) :: qdp(np,np,nlev,qsize,nelemd)
+    integer      ,intent(in) :: nx,num_trac,nets,nete
+    real(kind=r8) :: qdp(nx,nx,nlev,num_trac,nets:nete)
     character*(*),intent(in) :: outfld_name
-    integer      ,intent(in) :: nets,nete
 
     !---------------------------Local storage-------------------------------
 
-    real(kind=r8) :: qdp1(npsq),qdp2(npsq),qdp3(npsq),qdp4(npsq)
-    real(kind=r8) :: qdp_tmp
-
-    integer :: i,j,k,ie
+    integer :: ie
     integer :: ixcldice, ixcldliq, ixtt
     character(len=16) :: name_out1,name_out2,name_out3,name_out4
-
     !-----------------------------------------------------------------------
 
-    name_out1 = 'WV_'       //trim(outfld_name)
+    name_out1 = 'WV_'   //trim(outfld_name)
     name_out2 = 'WI_'   //trim(outfld_name)
     name_out3 = 'WL_'   //trim(outfld_name)
     name_out4 = 'TT_'   //trim(outfld_name)
 
     if ( hist_fld_active(name_out1).or.hist_fld_active(name_out2).or.hist_fld_active(name_out3).or.&
          hist_fld_active(name_out4)) then
-
-      if (qsize_condensate_loading>1) then
-        ixcldliq = qsize_condensate_loading_idx_gll(2)
-        ixcldice = qsize_condensate_loading_idx_gll(3)
-      else
-        ixcldliq = -1
-        ixcldice = -1
-      end if
-      if (tracer_transport_type == TRACERTRANSPORT_SE_GLL) then
-        call cnst_get_ind('TT_LW' , ixtt    , abort=.false.)
-      else
-        ixtt = -1
-      end if
+       
+      call cnst_get_ind('CLDLIQ', ixcldliq, abort=.false.)
+      call cnst_get_ind('CLDICE', ixcldice, abort=.false.)
+      call cnst_get_ind('TT_LW' , ixtt    , abort=.false.)
 
       do ie=nets,nete
-        qdp1 = 0.0_r8
-        qdp2 = 0.0_r8
-        qdp3 = 0.0_r8
-        qdp4 = 0.0_r8
-
-        do k = 1, nlev
-          do j = 1, np
-            do i = 1, np
-              qdp_tmp   = qdp(i,j,k,1,ie)/gravit
-              qdp1   (i+(j-1)*np) = qdp1(i+(j-1)*np) + qdp_tmp
-            end do
-          end do
-        end do
-
-        if (ixcldice > 0) then
-          do k = 1, nlev
-            do j = 1, np
-              do i = 1, np
-                qdp_tmp   = qdp(i,j,k,ixcldice,ie)/gravit
-                qdp2   (i+(j-1)*np) = qdp2(i+(j-1)*np) + qdp_tmp
-              end do
-            end do
-          end do
-        end if
-
-        if (ixcldliq > 0) then
-          do k = 1, nlev
-            do j = 1, np
-              do i = 1, np
-                qdp_tmp   = qdp(i,j,k,ixcldliq,ie)/gravit
-                qdp3   (i+(j-1)*np) = qdp3(i+(j-1)*np) + qdp_tmp
-              end do
-            end do
-          end do
-        end if
-
-
-        if (ixtt > 0) then
-          do k = 1, nlev
-            do j = 1, np
-              do i = 1, np
-                qdp_tmp   = qdp(i,j,k,ixtt,ie)/gravit
-                qdp4   (i+(j-1)*np) = qdp4(i+(j-1)*np) + qdp_tmp
-              end do
-            end do
-          end do
-        end if
-
-        call outfld(name_out1  ,qdp1       ,npsq,ie)
-        call outfld(name_out2  ,qdp2       ,npsq,ie)
-        call outfld(name_out3  ,qdp3       ,npsq,ie)
-        call outfld(name_out4  ,qdp4       ,npsq,ie)
+        call util_function(qdp(:,:,:,1,ie),nx,nlev,name_out1,ie)
+        if (ixcldice>0) call util_function(qdp(:,:,:,ixcldice,ie),nx,nlev,name_out2,ie)
+        if (ixcldliq>0) call util_function(qdp(:,:,:,ixcldliq,ie),nx,nlev,name_out3,ie)
+        if (ixtt>0    ) call util_function(qdp(:,:,:,ixtt    ,ie),nx,nlev,name_out4,ie)
       end do
     end if
   end subroutine output_qdp_var_dynamics
+
+  !
+  ! column integrate mass-variable and outfld
+  !
+  subroutine util_function(f_in,nx,nz,name_out,ie)
+    use physconst,   only: gravit
+    use cam_history, only: outfld, hist_fld_active
+    integer,           intent(in) :: nx,nz,ie
+    real(kind=r8),     intent(in) :: f_in(nx,nx,nz)
+    character(len=16), intent(in) :: name_out
+    real(kind=r8)       :: f_out(nx*nx)
+    integer             :: i,j,k
+    real(kind=r8)       :: inv_g
+    if (hist_fld_active(name_out)) then
+      f_out = 0.0_r8      
+      inv_g = 1.0_r8/gravit
+      do k = 1, nz
+        do j = 1, nx
+          do i = 1, nx
+            f_out(i+(j-1)*nx) = f_out(i+(j-1)*nx) + f_in(i,j,k)
+          end do
+        end do
+      end do
+      f_out = f_out*inv_g
+      call outfld(name_out,f_out,nx*nx,ie)
+    end if
+  end subroutine util_function
+
 
    subroutine compute_omega(hybrid,n0,qn0,elem,deriv,nets,nete,dt,hvcoord)
      use control_mod,    only : nu_p, hypervis_subcycle
@@ -1659,10 +1902,11 @@ contains
      real (kind=r8) :: divdp_full(np,np,nlev),vdp_full(np,np,2)
      real(kind=r8)  :: Otens(np,np  ,nlev,nets:nete), dt_hyper, sum_water(np,np,nlev)
 
-     type (EdgeBuffer_t) :: edgeOmega
+     ! type (EdgeBuffer_t) :: edgeOmega
      logical, parameter  :: del4omega = .true.
+!     logical, parameter  :: del4omega = .false.
 
-     call initEdgeBuffer(hybrid%par,edgeOmega,elem,nlev,bndry_type=HME_BNDRY_P2P, nthreads=horz_num_threads)
+     !call initEdgeBuffer(hybrid%par,edgeOmega,elem,nlev,bndry_type=HME_BNDRY_P2P, nthreads=horz_num_threads)
      do ie=nets,nete
         sum_water(:,:,:) = 1.0_r8
         do nq=1,qsize_condensate_loading
@@ -1713,7 +1957,7 @@ contains
        kptr=0
        call edgeVpack(edgeOmega, elem(ie)%derived%omega(:,:,:),nlev,kptr, ie)
      end do
-     call bndry_exchange(hybrid,edgeOmega)
+     call bndry_exchange(hybrid,edgeOmega,location='compute_omega #1')
      do ie=nets,nete
        kptr=0
        call edgeVunpack(edgeOmega, elem(ie)%derived%omega(:,:,:),nlev,kptr, ie)
@@ -1736,7 +1980,7 @@ contains
            kptr=0
            call edgeVpack(edgeOmega,Otens(:,:,:,ie) ,nlev,kptr, ie)
          end do
-         call bndry_exchange(hybrid,edgeOmega)
+         call bndry_exchange(hybrid,edgeOmega,location='compute_omega #2')
          do ie=nets,nete
            kptr=0
            call edgeVunpack(edgeOmega, Otens(:,:,:,ie),nlev,kptr, ie)
@@ -1749,10 +1993,10 @@ contains
          end do
        end do
      end if
-     call FreeEdgeBuffer(edgeOmega)
+     !call FreeEdgeBuffer(edgeOmega)
    end subroutine compute_omega
 
-  subroutine calc_dp3d_reference(elem,deriv,edge3,hybrid,nets,nete,nt,hvcoord,dp3d_ref)
+  subroutine calc_dp3d_reference(elem,edge3,hybrid,nets,nete,nt,hvcoord,dp3d_ref)
     !
     ! calc_dp3d_reference: When the del^4 horizontal damping is applied to dp3d 
     !                      the values are implicitly affected by natural variations 
@@ -1762,11 +2006,10 @@ contains
     !                    the current state values to compute appropriate 
     !                    reference values for the current (lagrangian) ETA-surfaces.
     !                    Damping should then be applied to values relative to 
-    !                    the reference.
+    !                    this reference.
     !=======================================================================
     use hybvcoord_mod  ,only: hvcoord_t
-    use physconst      ,only: rair
-    use derivative_mod ,only: gradient_sphere,derivative_t
+    use physconst      ,only: rair,cappa
     use element_mod,    only: element_t
     use dimensions_mod, only: np,nlev
     use hybrid_mod,     only: hybrid_t
@@ -1776,252 +2019,183 @@ contains
     ! Passed variables
     !-------------------
     type(element_t   ),target,intent(inout):: elem(:)
-    type(derivative_t)       ,intent(in   ):: deriv
     type(EdgeBuffer_t)       ,intent(inout):: edge3
     type(hybrid_t    )       ,intent(in   ):: hybrid
     integer                  ,intent(in   ):: nets,nete
     integer                  ,intent(in   ):: nt
     type(hvcoord_t   )       ,intent(in   ):: hvcoord
-    real(kind=r8)            ,intent(out)  :: dp3d_ref(np,np,nlev,nets:nete)
+    real(kind=r8)            ,intent(out  ):: dp3d_ref(np,np,nlev,nets:nete)
     !
     ! Local Values
     !--------------
-    real(kind=r8):: p_val    (np,np,nlev)
-    real(kind=r8):: ps_val   (np,np)
-    real(kind=r8):: ps_ref   (np,np,nets:nete)
-    real(kind=r8):: Tv_val   (np,np)
-    real(kind=r8):: Tv_grad  (np,np,2)
-    real(kind=r8):: phis_grad(np,np,2)
-    real(kind=r8):: phis_gamp(np,np)
-    real(kind=r8):: Tv_lapse (np,np)
-    real(kind=r8):: E_psXdp3d(nlev)
-    real(kind=r8):: E_dp3d   (nlev)
-    real(kind=r8):: E_Awgt,E_psval,E_psXps,E_laps,E_gamp,E_tv,E_phis,E_psref
-    real(kind=r8):: Expon,Coef,VARps_val
-    real(kind=r8):: S_Awgt
-    real(kind=r8):: S_dpavg(np,np,nlev)
-    real(kind=r8):: S_dpcov(np,np,nlev)
-    real(kind=r8):: S_psref(np,np)
-    integer      :: jm,jp,js,im,ip,is
+    real(kind=r8):: Phis_avg(np,np,     nets:nete)
+    real(kind=r8):: Phi_avg (np,np,nlev,nets:nete)
+    real(kind=r8):: RT_avg  (np,np,nlev,nets:nete)
+    real(kind=r8):: P_val   (np,np,nlev)
+    real(kind=r8):: Ps_val  (np,np)
+    real(kind=r8):: Phi_val (np,np,nlev)
+    real(kind=r8):: Phi_ival(np,np)
+    real(kind=r8):: I_Phi   (np,np,nlev+1)
+    real(kind=r8):: Alpha   (np,np,nlev  )
+    real(kind=r8):: I_P     (np,np,nlev+1)
+    real(kind=r8):: DP_avg  (np,np,nlev)
+    real(kind=r8):: P_avg   (np,np,nlev)
+    real(kind=r8):: Ps_avg  (np,np)
+    real(kind=r8):: Ps_ref  (np,np)
+    real(kind=r8):: RT_lapse(np,np)
+    real(kind=r8):: dlt_Ps  (np,np)
+    real(kind=r8):: dPhi    (np,np,nlev)
+    real(kind=r8):: dPhis   (np,np)
+    real(kind=r8):: E_Awgt,E_phis,E_phi(nlev),E_T(nlev),Lapse0,Expon0
     integer      :: ie,ii,jj,kk,kptr
-    !
-    real(kind=r8):: ps_refavg(np,np,nets:nete)
-    real(kind=r8):: dp3d_cov(np,np,nlev,nets:nete)
-    real(kind=r8):: dp3d_avg(np,np,nlev,nets:nete)
+
     ! Loop over elements
     !--------------------
     do ie=nets,nete
 
       ! Calculate Pressure values from dp3dp
       !--------------------------------------
-      kk=1
-      p_val(:,:,kk) = hvcoord%hyai(kk)*hvcoord%ps0      &
-               + elem(ie)%state%dp3d(:,:,kk,nt)*0.5_r8
+      P_val(:,:,1) = hvcoord%hyai(1)*hvcoord%ps0 + elem(ie)%state%dp3d(:,:,1,nt)*0.5_r8
       do kk=2,nlev
-        p_val(:,:,kk) =                  p_val(:,:,kk-1)         &
-             + elem(ie)%state%dp3d   (:,:,kk-1,nt)*0.5_r8 &
-             + elem(ie)%state%dp3d   (:,:,kk  ,nt)*0.5_r8
+        P_val(:,:,kk) =               P_val(:,:,kk-1)           &
+                      + elem(ie)%state%dp3d(:,:,kk-1,nt)*0.5_r8 &
+                      + elem(ie)%state%dp3d(:,:,kk  ,nt)*0.5_r8
       end do
-      ps_val(:,:) = p_val(:,:,nlev) + elem(ie)%state%dp3d(:,:,nlev,nt)*0.5_r8
-      !
-      ! Calculate R*Tv values at surface layer. 
-      ! Use the gradient dotted into the gradient if PHIS to estimate the surface lapse rate.
-      ! 
-      ! Note: PHIS dependent values could be precalculated and stored.
-      !
-      Tv_val(:,:) = rair*elem(ie)%state%T(:,:,nlev,nt)!*(1._r8+zvir*Q(:,:,nlev,1))
+      Ps_val(:,:) = P_val(:,:,nlev) + elem(ie)%state%dp3d(:,:,nlev,nt)*0.5_r8
 
-      call gradient_sphere(             Tv_val(:,:),deriv,elem(ie)%Dinv,  Tv_grad(:,:,:))
-      call gradient_sphere(elem(ie)%state%phis(:,:),deriv,elem(ie)%Dinv,phis_grad(:,:,:))
+      ! Calculate (dry) geopotential values
+      !--------------------------------------
+      dPhi    (:,:,:)    = 0.5_r8*(rair*elem(ie)%state%T   (:,:,:,nt) &
+                                      *elem(ie)%state%dp3d(:,:,:,nt) &
+                                                    /P_val(:,:,:)    )
+      Phi_val (:,:,nlev) = elem(ie)%state%phis(:,:) + dPhi(:,:,nlev)
+      Phi_ival(:,:)      = elem(ie)%state%phis(:,:) + dPhi(:,:,nlev)*2._r8
+      do kk=(nlev-1),1,-1
+        Phi_val (:,:,kk) = Phi_ival(:,:)    + dPhi(:,:,kk)
+        Phi_ival(:,:)    = Phi_val (:,:,kk) + dPhi(:,:,kk)
+      end do
 
-      phis_gamp(:,:) = (phis_grad(:,:,1)*phis_grad(:,:,1) + phis_grad(:,:,2)*phis_grad(:,:,2))
-      Tv_lapse (:,:) = (  Tv_grad(:,:,1)*phis_grad(:,:,1) +   Tv_grad(:,:,2)*phis_grad(:,:,2))
-
-      ! Calculate needed element average values
-      !------------------------------------------
-      E_Awgt  = 0.0_r8
-      E_psval = 0.0_r8
-      E_psXps = 0.0_r8
-      E_laps  = 0.0_r8
-      E_gamp  = 0.0_r8
-      E_tv    = 0.0_r8
-      E_phis  = 0.0_r8
+      ! Calculate Element averages
+      !----------------------------
+      E_Awgt   = 0.0_r8
+      E_phis   = 0.0_r8
+      E_phi(:) = 0._r8
+      E_T  (:) = 0._r8
       do jj=1,np
       do ii=1,np
-        E_Awgt  = E_Awgt  + elem(ie)%spheremp(ii,jj)
-        E_psval = E_psval + elem(ie)%spheremp(ii,jj)*ps_val   (ii,jj)
-        E_psXps = E_psXps + elem(ie)%spheremp(ii,jj)*ps_val   (ii,jj)*ps_val(ii,jj)
-        E_laps  = E_laps  + elem(ie)%spheremp(ii,jj)*Tv_lapse (ii,jj)
-        E_gamp  = E_gamp  + elem(ie)%spheremp(ii,jj)*phis_gamp(ii,jj)
-        E_tv    = E_tv    + elem(ie)%spheremp(ii,jj)*Tv_val   (ii,jj)
-        E_phis  = E_phis  + elem(ie)%spheremp(ii,jj)*elem(ie)%state%phis(ii,jj)
+        E_Awgt    = E_Awgt    + elem(ie)%spheremp(ii,jj)
+        E_phis    = E_phis    + elem(ie)%spheremp(ii,jj)*elem(ie)%state%phis(ii,jj)
+        E_phi (:) = E_phi (:) + elem(ie)%spheremp(ii,jj)*Phi_val(ii,jj,:)
+        E_T   (:) = E_T   (:) + elem(ie)%spheremp(ii,jj)*elem(ie)%state%T(ii,jj,:,nt)
       end do
       end do
-      E_psval = E_psval/E_Awgt
-      E_psXps = E_psXps/E_Awgt
-      E_laps  = E_laps /E_Awgt
-      E_gamp  = E_gamp /E_Awgt
-      E_tv    = E_tv   /E_Awgt
-      E_phis  = E_phis /E_Awgt
 
-      ! The estimates of surface lapse rates are still a work in progress, this 
-      ! way gives acceptable results for now.
-      !-----------------------------------------------------------------------
-      if(E_gamp.ne.0._r8) then
-        Tv_lapse(:,:) = E_laps/E_gamp
-      else
-        Tv_lapse(:,:) = 0._r8
-      endif
-
-      ! Calculate reference surface pressure values
-      !---------------------------------------------
-      E_psref = 0._r8
-      do jj=1,np
-      do ii=1,np
-        if(Tv_lapse(ii,jj).ne.0._r8) then
-          ! Hydrostatic PS along topography
-          !----------------------------------
-          Expon = -1._r8/Tv_lapse(ii,jj)
-          Coef  = Tv_lapse(ii,jj)/E_tv
-          ps_ref(ii,jj,ie) = E_psval*(1._r8+Coef*(elem(ie)%state%phis(ii,jj)-E_phis))**Expon
-        else
-          ! Locally Isothermal along topography
-          !--------------------------------------
-          ps_ref(ii,jj,ie) = E_psval*exp(-(elem(ie)%state%phis(ii,jj)-E_phis)/E_tv)
-        endif
-        E_psref = E_psref + elem(ie)%spheremp(ii,jj)*ps_ref(ii,jj,ie)
-      end do
-      end do
-      E_psref = E_psref/E_Awgt
-
-      ! remove element averages for ps_val
-      !-----------------------------------------------
-      ps_val(:,:) = ps_val(:,:) - E_psval
-
-      ! Calc dp3d covariances.
-      !------------------------
-      VARps_val = E_psXps - E_psval*E_psval
-      if(VARps_val.ne.0._r8) then
-        E_psXdp3d(:) = 0._r8
-        E_dp3d   (:) = 0._r8
-        do jj=1,np
-        do ii=1,np
-          E_psXdp3d(:) = E_psXdp3d(:) + elem(ie)%spheremp(ii,jj)*ps_val(ii,jj)                 &
-                                                                *elem(ie)%state%dp3d(ii,jj,:,nt)
-          E_dp3d   (:) = E_dp3d   (:) + elem(ie)%spheremp(ii,jj)*elem(ie)%state%dp3d(ii,jj,:,nt)
-        end do ! ii=1,np
-        end do ! jj=1,np
-        E_dp3d   (:) = E_dp3d   (:)/E_Awgt
-        E_psXdp3d(:) = E_psXdp3d(:)/E_Awgt
-        E_psXdp3d(:) = E_psXdp3d(:)/VARps_val
-      else
-        E_psXdp3d(:) = 0._r8
-        E_dp3d   (:) = 0._r8
-        do jj=1,np
-        do ii=1,np
-          E_dp3d(:) = E_dp3d(:) + elem(ie)%spheremp(ii,jj)*elem(ie)%state%dp3d(ii,jj,:,nt)
-        end do ! ii=1,np
-        end do ! jj=1,np
-        E_dp3d(:) = E_dp3d(:)/E_Awgt
-      endif
-
-      ! Store these values for a boundary exchange
-      !--------------------------------------------
-      ps_refavg(:,:,ie) = E_psref
+      Phis_avg(:,:,ie) = E_phis/E_Awgt
       do kk=1,nlev
-        dp3d_avg(:,:,kk,ie) = E_dp3d   (kk)
-        dp3d_cov(:,:,kk,ie) = E_psXdp3d(kk)
+        Phi_avg(:,:,kk,ie) = E_phi(kk)     /E_Awgt
+        RT_avg (:,:,kk,ie) = E_T  (kk)*rair/E_Awgt
       end do
-
     end do ! ie=nets,nete
 
-    ! Boundary exchange of values needed to evaluate dp3d_ref
-    !---------------------------------------------------------
+    ! Boundary Exchange of average values
+    !-------------------------------------
     do ie=nets,nete
-
-      ! Scale and pack values for boundary exchange
-      !----------------------------------------------------
-      ps_refavg(:,:,ie) = elem(ie)%spheremp(:,:)*ps_refavg(:,:,ie)
+      Phis_avg(:,:,ie) = elem(ie)%spheremp(:,:)*Phis_avg(:,:,ie)
       do kk=1,nlev
-        dp3d_avg(:,:,kk,ie) = elem(ie)%spheremp(:,:)*dp3d_avg(:,:,kk,ie)
-                                           
-        dp3d_cov(:,:,kk,ie) = elem(ie)%spheremp(:,:)*dp3d_cov(:,:,kk,ie)
+        Phi_avg(:,:,kk,ie) = elem(ie)%spheremp(:,:)*Phi_avg(:,:,kk,ie)
+        RT_avg (:,:,kk,ie) = elem(ie)%spheremp(:,:)*RT_avg (:,:,kk,ie)
       end do
       kptr = 0
-      call edgeVpack(edge3,dp3d_avg(1,1,1,ie),nlev,kptr,ie)
+      call edgeVpack(edge3,Phi_avg(:,:,:,ie),nlev,kptr,ie)
       kptr = nlev
-      call edgeVpack(edge3,dp3d_cov(1,1,1,ie),nlev,kptr,ie)
+      call edgeVpack(edge3,RT_avg (:,:,:,ie),nlev,kptr,ie)
       kptr = 2*nlev
-      call edgeVpack(edge3,ps_refavg(1,1,ie),1,kptr,ie)
+      call edgeVpack(edge3,Phis_avg (:,:,ie),1   ,kptr,ie)
     end do ! ie=nets,nete
 
-    ! boundary exchange
-    !-------------------
-    call bndry_exchange(hybrid,edge3)
+    call bndry_exchange(hybrid,edge3,location='calc_dp3d_reference')
+
+    do ie=nets,nete
+      kptr = 0
+      call edgeVunpack(edge3,Phi_avg(:,:,:,ie),nlev,kptr,ie)
+      kptr = nlev
+      call edgeVunpack(edge3,RT_avg (:,:,:,ie),nlev,kptr,ie)
+      kptr = 2*nlev
+      call edgeVunpack(edge3,Phis_avg (:,:,ie),1   ,kptr,ie)
+      Phis_avg(:,:,ie) = elem(ie)%rspheremp(:,:)*Phis_avg(:,:,ie)
+      do kk=1,nlev
+        Phi_avg(:,:,kk,ie) = elem(ie)%rspheremp(:,:)*Phi_avg(:,:,kk,ie)
+        RT_avg (:,:,kk,ie) = elem(ie)%rspheremp(:,:)*RT_avg (:,:,kk,ie)
+      end do
+    end do ! ie=nets,nete
 
     ! Loop over elements
     !--------------------
     do ie=nets,nete
-      ! Unpack and scale values
-      !--------------------------------
-      kptr = 0
-      call edgeVunpack(edge3,dp3d_avg(1,1,1,ie),nlev,kptr,ie)
-      kptr = nlev
-      call edgeVunpack(edge3,dp3d_cov(1,1,1,ie),nlev,kptr,ie)
-      kptr = 2*nlev
-      call edgeVunpack(edge3,ps_refavg(1,1,ie),1,kptr,ie)
 
-      ps_refavg(:,:,ie) = elem(ie)%rspheremp(:,:)*ps_refavg(:,:,ie)
-                                       
+      ! Fill elements with uniformly varying average values
+      !-----------------------------------------------------
+      call fill_element(Phis_avg(1,1,ie))
       do kk=1,nlev
-        dp3d_avg(:,:,kk,ie) = elem(ie)%rspheremp(:,:)*dp3d_avg(:,:,kk,ie)
-                                           
-        dp3d_cov(:,:,kk,ie) = elem(ie)%rspheremp(:,:)*dp3d_cov(:,:,kk,ie)
+        call fill_element(Phi_avg(1,1,kk,ie))
+        call fill_element(RT_avg (1,1,kk,ie))
       end do
 
-      ! Carry out area-weighted averaging for internal elemenet points
-      !--------------------------------------------------------------------
-      S_dpavg(:,:,:) = dp3d_avg (:,:,:,ie)
-      S_dpcov(:,:,:) = dp3d_cov (:,:,:,ie)
-      S_psref(:,:)   = ps_refavg(:,:,ie)
-      do jj=2,(np-1)
-        jp = jj + 1
-        jm = jj - 1
-        do ii=2,(np-1)
-          ip = ii + 1
-          im = ii - 1
-          S_Awgt           = 0._r8
-          S_dpavg(ii,jj,:) = 0._r8
-          S_dpcov(ii,jj,:) = 0._r8
-          S_psref(ii,jj)   = 0._r8
-          do js = jm,jp
-          do is = im,ip
-            S_Awgt           = S_Awgt           + elem(ie)%spheremp         (is,js)
-            S_dpavg(ii,jj,:) = S_dpavg(ii,jj,:) + elem(ie)%spheremp         (is,js) &
-                                                 *dp3d_avg (is,js,:,ie)
-            S_dpcov(ii,jj,:) = S_dpcov(ii,jj,:) + elem(ie)%spheremp         (is,js) &
-                                                 *dp3d_cov (is,js,:,ie)
-            S_psref(ii,jj)   = S_psref(ii,jj)   + elem(ie)%spheremp         (is,js) &
-                                                 *ps_refavg(is,js,ie)
-          end do
-          end do
-          S_dpavg(ii,jj,:) = S_dpavg(ii,jj,:)/S_Awgt
-          S_dpcov(ii,jj,:) = S_dpcov(ii,jj,:)/S_Awgt
-          S_psref(ii,jj  ) = S_psref(ii,jj  )/S_Awgt
-        end do
+      ! Integrate upward to compute Alpha == (dp3d/P)
+      !----------------------------------------------
+      I_Phi(:,:,nlev+1) = Phis_avg(:,:,ie)
+      do kk=nlev,1,-1
+        I_Phi(:,:,kk) = 2._r8* Phi_avg(:,:,kk,ie) - I_Phi(:,:,kk+1)
+        Alpha(:,:,kk) = 2._r8*(Phi_avg(:,:,kk,ie) - I_Phi(:,:,kk+1))/RT_avg(:,:,kk,ie)
       end do
-      dp3d_avg (:,:,:,ie) = S_dpavg(:,:,:)
-      dp3d_cov (:,:,:,ie) = S_dpcov(:,:,:)
-      ps_refavg(:,:,ie) = S_psref(:,:)
 
-      ! Now Evaluate dp3d reference values
-      !------------------------------------
+      ! Integrate downward to compute corresponding average pressure values 
+      !---------------------------------------------------------------------
+      I_P(:,:,1) = hvcoord%hyai(1)*hvcoord%ps0
       do kk=1,nlev
-        dp3d_ref(:,:,kk,ie) = dp3d_avg(:,:,kk,ie) &
-                                          +(dp3d_cov(:,:,kk,ie) &
-                                          * (ps_ref(:,:,ie)  &
-                                            -ps_refavg(:,:,ie)))
+        DP_avg(:,:,kk  ) = I_P(:,:,kk)*(2._r8 * Alpha(:,:,kk))/(2._r8 - Alpha(:,:,kk))
+        P_avg (:,:,kk  ) = I_P(:,:,kk)*(2._r8                )/(2._r8 - Alpha(:,:,kk))
+        I_P   (:,:,kk+1) = I_P(:,:,kk)*(2._r8 + Alpha(:,:,kk))/(2._r8 - Alpha(:,:,kk))
       end do
+      Ps_avg(:,:) = I_P(:,:,nlev+1)
+
+      ! Determine an appropriate d<T>/d<PHI> lapse rate near the surface
+      ! OPTIONALLY: Use dry adiabatic lapse rate or environmental lapse rate.
+      !-----------------------------------------------------------------------
+      if(.FALSE.) then
+        ! DRY ADIABATIC laspe rate
+        !------------------------------
+        RT_lapse(:,:) = -cappa
+      else
+        ! ENVIRONMENTAL (empirical) laspe rate
+        !--------------------------------------
+        RT_lapse(:,:) =  (RT_avg (:,:,nlev-1,ie)-RT_avg (:,:,nlev,ie)) &
+                        /(Phi_avg(:,:,nlev-1,ie)-Phi_avg(:,:,nlev,ie))
+      endif
+
+      ! Calcualte reference surface pressure
+      !--------------------------------------
+      dPhis(:,:) = elem(ie)%state%phis(:,:)-Phis_avg(:,:,ie)
+      do jj=1,np
+      do ii=1,np
+        if (abs(RT_lapse(ii,jj)) .gt. 1.e-3_r8) then
+          Lapse0 = RT_lapse(ii,jj)/RT_avg(ii,jj,nlev,ie)
+          Expon0 = (-1._r8/RT_lapse(ii,jj))
+          Ps_ref(ii,jj) = Ps_avg(ii,jj)*((1._r8 + Lapse0*dPhis(ii,jj))**Expon0)
+        else
+          Ps_ref(ii,jj) = Ps_avg(ii,jj)*exp(-dPhis(ii,jj)/RT_avg(ii,jj,nlev,ie))
+        endif
+      end do
+      end do
+
+      ! Calculate reference dp3d values
+      !---------------------------------
+      dlt_Ps(:,:) = Ps_ref(:,:) - Ps_avg(:,:)
+      do kk=1,nlev
+        dp3d_ref(:,:,kk,ie) = DP_avg(:,:,kk) + (hvcoord%hybi(kk+1)            &
+                                               -hvcoord%hybi(kk  ))*dlt_Ps(:,:)
+      end do
+
     end do ! ie=nets,nete
 
     ! End Routine
@@ -2031,4 +2205,104 @@ contains
   !=============================================================================
 
 
+  !=============================================================================
+  subroutine fill_element(Eval)
+    !
+    ! fill_element_bilin: Fill in element gridpoints using local bi-linear
+    !                     interpolation of nearby average values.
+    ! 
+    !                     NOTE: This routine is hard coded for NP=4, if a
+    !                           different value of NP is used... bad things 
+    !                           will happen.
+    !=======================================================================
+    use dimensions_mod,only: np
+    !                  
+    ! Passed variables
+    !-------------------
+    real(kind=r8),intent(inout):: Eval(np,np)
+    !
+    ! Local Values
+    !--------------
+    real(kind=r8):: X0
+    real(kind=r8):: S1,S2,S3,S4
+    real(kind=r8):: C1,C2,C3,C4
+    real(kind=r8):: E1,E2,E3,E4,E0
+
+    X0 = sqrt(1._r8/5._r8)
+
+    ! Set the "known" values Eval
+    !----------------------------
+    S1 = (Eval(1 ,2 )+Eval(1 ,3 ))/2._r8
+    S2 = (Eval(2 ,np)+Eval(3 ,np))/2._r8
+    S3 = (Eval(np,2 )+Eval(np,3 ))/2._r8
+    S4 = (Eval(2 ,1 )+Eval(3 ,1 ))/2._r8
+    C1 = Eval(1 ,1 )
+    C2 = Eval(1 ,np)
+    C3 = Eval(np,np)
+    C4 = Eval(np,1 )
+
+    ! E0 OPTION: Element Center value:
+    !---------------------------------
+    IF(.FALSE.) THEN
+      ! Use ELEMENT AVERAGE value contained in (2,2)
+      !----------------------------------------------
+      E0 = Eval(2,2)
+    ELSE
+      ! Use AVG OF SIDE VALUES after boundary exchange of E0 (smooting option)
+      !-----------------------------------------------------------------------
+      E0 = (S1 + S2 + S3 + S4)/4._r8  
+    ENDIF
+
+    ! Calc interior values along center axes
+    !----------------------------------------
+    E1 = E0 + X0*(S1-E0)
+    E2 = E0 + X0*(S2-E0)
+    E3 = E0 + X0*(S3-E0)
+    E4 = E0 + X0*(S4-E0)
+
+    ! Calculate Side Gridpoint Values for Eval
+    !------------------------------------------
+    Eval(1 ,2 ) = S1 + X0*(C1-S1)
+    Eval(1 ,3 ) = S1 + X0*(C2-S1)
+    Eval(2 ,np) = S2 + X0*(C2-S2)
+    Eval(3 ,np) = S2 + X0*(C3-S2)
+    Eval(np,2 ) = S3 + X0*(C4-S3)
+    Eval(np,3 ) = S3 + X0*(C3-S3)
+    Eval(2 ,1 ) = S4 + X0*(C1-S4)
+    Eval(3 ,1 ) = S4 + X0*(C4-S4)
+
+    ! Calculate interior values
+    !---------------------------
+    Eval(2 ,2 ) = E1 + X0*(Eval(2 ,1 )-E1)
+    Eval(2 ,3 ) = E1 + X0*(Eval(2 ,np)-E1)
+    Eval(3 ,2 ) = E3 + X0*(Eval(3 ,1 )-E3)
+    Eval(3 ,3 ) = E3 + X0*(Eval(3 ,np)-E3)
+
+    ! End Routine
+    !------------
+    return
+  end subroutine fill_element
+
+  subroutine rayleigh_friction(elem,nt,nets,nete,dt)
+    use dimensions_mod, only: np, nlev, otau
+    use hybrid_mod,     only: hybrid_t!, get_loop_ranges
+    use element_mod,    only: element_t
+    
+    type (element_t)   , intent(inout), target :: elem(:)
+    integer            , intent(in)   :: nets,nete, nt
+    real(r8)                          :: dt
+
+    real(r8) :: c1, c2
+    integer  :: k,ie
+
+    do ie=nets,nete
+      do k=1,nlev
+        c2 = 1._r8 / (1._r8 + otau(k)*dt)
+        c1 = -otau(k) * c2 * dt
+        elem(ie)%state%v(:,:,:,k,nt) = elem(ie)%state%v(:,:,:,k,nt)+c1 * elem(ie)%state%v(:,:,:,k,nt)
+!         ptend%s(:ncol,k) = c3 * (state%u(:ncol,k)**2 + state%v(:ncol,k)**2)
+      enddo
+    end do    
+  end subroutine rayleigh_friction
+  
 end module prim_advance_mod

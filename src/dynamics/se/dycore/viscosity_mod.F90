@@ -24,7 +24,6 @@ module viscosity_mod
   implicit none
   save
 
-  public :: biharmonic_wk
   public :: biharmonic_wk_scalar
   public :: biharmonic_wk_omega
   public :: neighbor_minmax, neighbor_minmax_start,neighbor_minmax_finish
@@ -51,130 +50,10 @@ module viscosity_mod
 
 CONTAINS
 
-subroutine biharmonic_wk(elem,pstens,ptens,vtens,deriv,edge3,hybrid,nt,nets,nete,kbeg,kend)
-!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-! compute weak biharmonic operator
-!    input:  h,v (stored in elem()%, in lat-lon coordinates
-!    output: ptens,vtens  overwritten with weak biharmonic of h,v (output in lat-lon coordinates)
-!
-!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-type (hybrid_t)      , intent(in) :: hybrid
-type (element_t)     , intent(inout), target :: elem(:)
-integer :: nt,nets,nete,kbeg,kend
-real (kind=r8), dimension(np,np,2,nlev,nets:nete)  :: vtens
-real (kind=r8), dimension(np,np,nlev,nets:nete) :: ptens
-type (EdgeBuffer_t)  , intent(inout) :: edge3
-type (derivative_t)  , intent(in) :: deriv
-real (kind=r8), dimension(np,np,nets:nete) :: pstens
-
-! local
-integer :: k,kptr,i,j,ie,ic,kblk
-real (kind=r8), dimension(:,:), pointer :: rspheremv
-real (kind=r8), dimension(np,np) :: lap_ps
-real (kind=r8), dimension(np,np,nlev) :: T
-real (kind=r8), dimension(np,np,2) :: v
-real (kind=r8) ::  nu_ratio1,nu_ratio2
-logical var_coef1
-
-   !if tensor hyperviscosity with tensor V is used, then biharmonic operator is (\grad\cdot V\grad) (\grad \cdot \grad) 
-   !so tensor is only used on second call to laplace_sphere_wk
-
-   kblk = kend - kbeg + 1
-
-   var_coef1 = .true.
-   if(hypervis_scaling > 0)  var_coef1= .false.
-
-   nu_ratio1=1
-   nu_ratio2=1
-   if (nu_div/=nu) then
-      if(hypervis_scaling /= 0) then
-         ! we have a problem with the tensor in that we cant seperate
-         ! div and curl components.  So we do, with tensor V:
-         ! nu * (del V del ) * ( nu_ratio * grad(div) - curl(curl))
-         nu_ratio1=nu_div/nu
-         nu_ratio2=1
-      else
-         nu_ratio1=sqrt(nu_div/nu)
-         nu_ratio2=sqrt(nu_div/nu)
-      endif
-   endif
-
-
-   do ie=nets,nete
-      
-      ! should filter lnps + PHI_s/RT?
-      call laplace_sphere_wk(elem(ie)%state%psdry(:,:,nt),deriv,elem(ie),pstens(:,:,ie),var_coef=var_coef1)
-      
-      do k=kbeg,kend
-         do j=1,np
-            do i=1,np
-               T(i,j,k)=elem(ie)%state%T(i,j,k,nt) 
-            enddo
-         enddo
-        
-         call laplace_sphere_wk(T(:,:,k),deriv,elem(ie),ptens(:,:,k,ie),var_coef=var_coef1)
-         call vlaplace_sphere_wk(elem(ie)%state%v(:,:,:,k,nt),deriv,&
-              elem(ie),vtens(:,:,:,k,ie),var_coef=var_coef1,nu_ratio=nu_ratio1)
-
-      enddo
-
-      kptr = kbeg - 1
-      call edgeVpack(edge3,ptens(:,:,kbeg:kend,ie),kblk,kptr,ie)
-
-      kptr = (kbeg - 1) + nlev
-      call edgeVpack(edge3,vtens(:,:,1,kbeg:kend,ie),kblk,kptr,ie)
-
-      kptr = (kbeg - 1) + 2*nlev
-      call edgeVpack(edge3,vtens(:,:,2,kbeg:kend,ie),kblk,kptr,ie)
-
-      kptr = (kbeg - 1) + 3*nlev
-      call edgeVpack(edge3,pstens(:,:,ie),1,kptr,ie) ! need logic for surface field
-   enddo
-   
-   call bndry_exchange(hybrid,edge3)
-   
-   do ie=nets,nete
-      rspheremv => elem(ie)%rspheremp(:,:)
-      
-      kptr = kbeg - 1
-      call edgeVunpack(edge3,ptens(:,:,kbeg:kend,ie),kblk,kptr,ie)
-
-      kptr = (kbeg - 1) + nlev
-      call edgeVunpack(edge3,vtens(:,:,1,kbeg:kend,ie),kblk,kptr,ie)
-      
-      kptr = (kbeg - 1) + 2*nlev
-      call edgeVunpack(edge3,vtens(:,:,2,kbeg:kend,ie),kblk,kptr,ie)
-
-      ! apply inverse mass matrix, then apply laplace again
-      do k=kbeg,kend
-         do j=1,np
-            do i=1,np
-               T(i,j,k)=rspheremv(i,j)*ptens(i,j,k,ie)
-               v(i,j,1)=rspheremv(i,j)*vtens(i,j,1,k,ie)
-               v(i,j,2)=rspheremv(i,j)*vtens(i,j,2,k,ie)
-            enddo
-         enddo
-         call laplace_sphere_wk(T(:,:,k),deriv,elem(ie),ptens(:,:,k,ie),var_coef=.true.)
-         call vlaplace_sphere_wk(v(:,:,:),deriv,elem(ie),vtens(:,:,:,k,ie),var_coef=.true.,&
-              nu_ratio=nu_ratio2)
-      enddo
-         
-      kptr = (kbeg - 1) + 3*nlev 
-      call edgeVunpack(edge3,pstens(:,:,ie),1,kptr,ie) ! need logic for surface field
-
-      ! apply inverse mass matrix, then apply laplace again
-      lap_ps(:,:)=rspheremv(:,:)*pstens(:,:,ie)
-      call laplace_sphere_wk(lap_ps,deriv,elem(ie),lap_ps,var_coef=.true.)
-
-   enddo
-!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-end subroutine
-
-
 subroutine biharmonic_wk_dp3d(elem,dptens,dpflux,ttens,vtens,deriv,edge3,hybrid,nt,nets,nete,kbeg,kend,&
-     dptens2,dp3d_ref)
+     dp3d_ref,T_ref)
   use derivative_mod, only : subcell_Laplace_fluxes
-  use dimensions_mod, only : ntrac
+  use dimensions_mod, only : ntrac, nu_div_scale_top
   
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
   ! compute weak biharmonic operator
@@ -189,7 +68,7 @@ subroutine biharmonic_wk_dp3d(elem,dptens,dpflux,ttens,vtens,deriv,edge3,hybrid,
   real (kind=r8), intent(out), dimension(nc,nc,4,nlev,nets:nete) :: dpflux
   real (kind=r8), dimension(np,np,2,nlev,nets:nete)  :: vtens
   real (kind=r8), dimension(np,np,nlev,nets:nete) :: ttens,dptens
-  real (kind=r8), dimension(np,np,nlev,nets:nete), optional :: dptens2, dp3d_ref
+  real (kind=r8), dimension(np,np,nlev,nets:nete), optional :: dp3d_ref,T_ref
   type (EdgeBuffer_t)  , intent(inout) :: edge3
   type (derivative_t)  , intent(in) :: deriv
   
@@ -210,36 +89,38 @@ subroutine biharmonic_wk_dp3d(elem,dptens,dpflux,ttens,vtens,deriv,edge3,hybrid,
   var_coef1 = .true.
   if(hypervis_scaling > 0)    var_coef1 = .false.
   
-  nu_ratio1=1
-  nu_ratio2=1
-  if (nu_div/=nu) then
-    if(hypervis_scaling /= 0) then
-      ! we have a problem with the tensor in that we cant seperate
-      ! div and curl components.  So we do, with tensor V:
-      ! nu * (del V del ) * ( nu_ratio * grad(div) - curl(curl))
-      nu_ratio1=nu_div/nu
-      nu_ratio2=1
-    else
-      nu_ratio1=sqrt(nu_div/nu)
-      nu_ratio2=sqrt(nu_div/nu)
-    endif
-  endif
   
   do ie=nets,nete    
-!$omp parallel do num_threads(vert_num_threads) private(tmp)
+!$omp parallel do num_threads(vert_num_threads) private(k,tmp)
     do k=kbeg,kend
-      tmp=elem(ie)%state%T(:,:,k,nt) 
+       nu_ratio1=1
+       nu_ratio2=1
+       if (nu_div/=nu) then
+          if(hypervis_scaling /= 0) then
+             ! we have a problem with the tensor in that we cant seperate
+             ! div and curl components.  So we do, with tensor V:
+             ! nu * (del V del ) * ( nu_ratio * grad(div) - curl(curl))             
+             nu_ratio1=nu_div_scale_top(k)*nu_div/nu
+             nu_ratio2=1
+          else
+             nu_ratio1=sqrt(nu_div_scale_top(k)*nu_div/nu)
+             nu_ratio2=sqrt(nu_div_scale_top(k)*nu_div/nu)
+          endif
+       endif
+
+      if (present(T_ref)) then
+        tmp=elem(ie)%state%T(:,:,k,nt)-T_ref(:,:,k,ie)
+      else
+        tmp=elem(ie)%state%T(:,:,k,nt) 
+      end if
       call laplace_sphere_wk(tmp,deriv,elem(ie),ttens(:,:,k,ie),var_coef=var_coef1)
-      if (present(dptens2)) then 
+      if (present(dp3d_ref)) then 
         tmp=elem(ie)%state%dp3d(:,:,k,nt)-dp3d_ref(:,:,k,ie)
       else
         tmp=elem(ie)%state%dp3d(:,:,k,nt) 
       end if
       call laplace_sphere_wk(tmp,deriv,elem(ie),dptens(:,:,k,ie),var_coef=var_coef1)
-      if (present(dptens2)) then 
-        tmp=elem(ie)%state%dp3d(:,:,k,nt)
-        call laplace_sphere_wk(tmp,deriv,elem(ie),dptens2(:,:,k,ie),var_coef=var_coef1)
-      end if
+
       call vlaplace_sphere_wk(elem(ie)%state%v(:,:,:,k,nt),deriv,elem(ie),vtens(:,:,:,k,ie), &
            var_coef=var_coef1,nu_ratio=nu_ratio1)
     enddo
@@ -255,13 +136,9 @@ subroutine biharmonic_wk_dp3d(elem,dptens,dpflux,ttens,vtens,deriv,edge3,hybrid,
     
     kptr = kbeg - 1 + 3*nlev 
     call edgeVpack(edge3,dptens(:,:,kbeg:kend,ie),kblk,kptr,ie)
-    if (present(dptens2)) then
-      kptr = kbeg - 1 + 4*nlev 
-      call edgeVpack(edge3,dptens2(:,:,kbeg:kend,ie),kblk,kptr,ie)
-    end if    
   enddo
   
-  call bndry_exchange(hybrid,edge3)
+  call bndry_exchange(hybrid,edge3,location='biharmonic_wk_dp3d')
   
   do ie=nets,nete
 !CLEAN    rspheremv     => elem(ie)%rspheremp(:,:)
@@ -278,11 +155,6 @@ subroutine biharmonic_wk_dp3d(elem,dptens,dpflux,ttens,vtens,deriv,edge3,hybrid,
     kptr = kbeg - 1 + 3*nlev 
     call edgeVunpack(edge3,dptens(:,:,kbeg:kend,ie),kblk,kptr,ie)
     
-    if (present(dptens2)) then
-      kptr = kbeg - 1 + 4*nlev 
-      call edgeVunpack(edge3,dptens2(:,:,kbeg:kend,ie),kblk,kptr,ie)
-    end if
-
     if (ntrac>0) then
       do k=1,nlev
 !CLEAN        tmp(:,:)= rspheremv(:,:)*dptens(:,:,k,ie) 
@@ -292,7 +164,7 @@ subroutine biharmonic_wk_dp3d(elem,dptens,dpflux,ttens,vtens,deriv,edge3,hybrid,
     endif
     
     ! apply inverse mass matrix, then apply laplace again
-!$omp parallel do num_threads(vert_num_threads) private(v,tmp,tmp2)
+    !$omp parallel do num_threads(vert_num_threads) private(k,v,tmp,tmp2)
     do k=kbeg,kend
 !CLEAN      tmp(:,:)=rspheremv(:,:)*ttens(:,:,k,ie)
       tmp(:,:)=elem(ie)%rspheremp(:,:)*ttens(:,:,k,ie)
@@ -300,11 +172,6 @@ subroutine biharmonic_wk_dp3d(elem,dptens,dpflux,ttens,vtens,deriv,edge3,hybrid,
 !CLEAN      tmp2(:,:)=rspheremv(:,:)*dptens(:,:,k,ie)
       tmp2(:,:)=elem(ie)%rspheremp(:,:)*dptens(:,:,k,ie)
       call laplace_sphere_wk(tmp2,deriv,elem(ie),dptens(:,:,k,ie),var_coef=.true.)
-      if (present(dptens2)) then
-!CLEAN        tmp2(:,:)=rspheremv(:,:)*dptens2(:,:,k,ie)
-        tmp2(:,:)=elem(ie)%rspheremp(:,:)*dptens2(:,:,k,ie)
-        call laplace_sphere_wk(tmp2,deriv,elem(ie),dptens2(:,:,k,ie),var_coef=.true.)
-      end if
 !CLEAN      v(:,:,1)=rspheremv(:,:)*vtens(:,:,1,k,ie)
 !CLEAN      v(:,:,2)=rspheremv(:,:)*vtens(:,:,2,k,ie)
 
@@ -349,7 +216,7 @@ subroutine biharmonic_wk_omega(elem,ptens,deriv,edge3,hybrid,nets,nete,kbeg,kend
   
   do ie=nets,nete
     
-!$omp parallel do num_threads(vert_num_threads) private(tmp)
+    !$omp parallel do num_threads(vert_num_threads) private(k,tmp)
     do k=kbeg,kend
       tmp=elem(ie)%derived%omega(:,:,k) 
       call laplace_sphere_wk(tmp,deriv,elem(ie),ptens(:,:,k,ie),var_coef=var_coef1)
@@ -359,7 +226,7 @@ subroutine biharmonic_wk_omega(elem,ptens,deriv,edge3,hybrid,nets,nete,kbeg,kend
     call edgeVpack(edge3,ptens(:,:,kbeg:kend,ie),kblk,kptr,ie)
   enddo
   
-  call bndry_exchange(hybrid,edge3)
+  call bndry_exchange(hybrid,edge3,location='biharmonic_wk_omega')
   
   do ie=nets,nete
     rspheremv     => elem(ie)%rspheremp(:,:)
@@ -368,7 +235,7 @@ subroutine biharmonic_wk_omega(elem,ptens,deriv,edge3,hybrid,nets,nete,kbeg,kend
     call edgeVunpack(edge3,ptens(:,:,kbeg:kend,ie),kblk,kptr,ie)
     
     ! apply inverse mass matrix, then apply laplace again
-!$omp parallel do num_threads(vert_num_threads) private(v,tmp,tmp2)
+    !$omp parallel do num_threads(vert_num_threads) private(k,tmp)
     do k=kbeg,kend
       tmp(:,:)=rspheremv(:,:)*ptens(:,:,k,ie)
       call laplace_sphere_wk(tmp,deriv,elem(ie),ptens(:,:,k,ie),var_coef=.true.)
@@ -459,7 +326,7 @@ integer :: k,i,j,ie,ic,kptr,nthread_save
 
 do ie=nets,nete
 #if (defined COLUMN_OPENMP)
-!$omp parallel do private(k)
+!$omp parallel do num_threads(vert_num_threads) private(k)
 #endif
    do k=1,nlev
       zeta(:,:,k,ie)=zeta(:,:,k,ie)*elem(ie)%spheremp(:,:)
@@ -467,12 +334,12 @@ do ie=nets,nete
    kptr=0
    call edgeVpack(edge1, zeta(1,1,1,ie),nlev,kptr,ie)
 enddo
-call bndry_exchange(hybrid,edge1)
+call bndry_exchange(hybrid,edge1,location='make_C0')
 do ie=nets,nete
    kptr=0
    call edgeVunpack(edge1, zeta(1,1,1,ie),nlev,kptr, ie)
 #if (defined COLUMN_OPENMP)
-!$omp parallel do private(k)
+!$omp parallel do num_threads(vert_num_threads) private(k)
 #endif
    do k=1,nlev
       zeta(:,:,k,ie)=zeta(:,:,k,ie)*elem(ie)%rspheremp(:,:)
@@ -525,7 +392,7 @@ real (kind=r8), dimension(np,np,nlev,nets:nete) :: v1
 
 do ie=nets,nete
 #if (defined COLUMN_OPENMP)
-!$omp parallel do private(k)
+!$omp parallel do num_threads(vert_num_threads) private(k)
 #endif
    do k=1,nlev
       v(:,:,1,k,ie)=v(:,:,1,k,ie)*elem(ie)%spheremp(:,:)
@@ -534,12 +401,12 @@ do ie=nets,nete
    kptr=0
    call edgeVpack(edge2, v(1,1,1,1,ie),2*nlev,kptr,ie)
 enddo
-call bndry_exchange(hybrid,edge2)
+call bndry_exchange(hybrid,edge2,location='make_C0_vector')
 do ie=nets,nete
    kptr=0
    call edgeVunpack(edge2, v(1,1,1,1,ie),2*nlev,kptr,ie)
 #if (defined COLUMN_OPENMP)
-!$omp parallel do private(k)
+!$omp parallel do num_threads(vert_num_threads) private(k)
 #endif
    do k=1,nlev
       v(:,:,1,k,ie)=v(:,:,1,k,ie)*elem(ie)%rspheremp(:,:)
@@ -711,7 +578,7 @@ call derivinit(deriv)
 
 do ie=nets,nete
 #if (defined COLUMN_OPENMP)
-!$omp parallel do private(k)
+!$omp parallel do num_threads(vert_num_threads) private(k)
 #endif
 do k=1,nlev
    call vorticity_sphere(elem(ie)%state%v(:,:,:,k,nt),deriv,elem(ie),zeta(:,:,k,ie))
@@ -746,7 +613,7 @@ call derivinit(deriv)
 
 do ie=nets,nete
 #if (defined COLUMN_OPENMP)
-!$omp parallel do private(k)
+!$omp parallel do num_threads(vert_num_threads) private(k)
 #endif
 do k=1,nlev
    call divergence_sphere(elem(ie)%state%v(:,:,:,k,nt),deriv,elem(ie),zeta(:,:,k,ie))
@@ -790,7 +657,7 @@ subroutine neighbor_minmax(hybrid,edgeMinMax,nets,nete,min_neigh,max_neigh)
       enddo
    enddo
    
-   call bndry_exchange(hybrid,edgeMinMax)
+   call bndry_exchange(hybrid,edgeMinMax,location='neighbor_minmax')
 
    do ie=nets,nete
       do q=qbeg,qend
@@ -834,7 +701,7 @@ subroutine neighbor_minmax_start(hybrid,edgeMinMax,nets,nete,min_neigh,max_neigh
       enddo
    enddo
 
-   call bndry_exchange_start(hybrid,edgeMinMax)
+   call bndry_exchange_start(hybrid,edgeMinMax,location='neighbor_minmax_start')
 
 end subroutine neighbor_minmax_start
 
@@ -854,7 +721,7 @@ subroutine neighbor_minmax_finish(hybrid,edgeMinMax,nets,nete,min_neigh,max_neig
    kblk = kend - kbeg + 1   ! calculate size of the block of vertical levels
    qblk = qend - qbeg + 1   ! calculate size of the block of tracers
 
-   call bndry_exchange_finish(hybrid,edgeMinMax)
+   call bndry_exchange_finish(hybrid,edgeMinMax,location='neighbor_minmax_finish')
 
    do ie=nets,nete
       do q=qbeg, qend
