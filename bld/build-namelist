@@ -1757,14 +1757,6 @@ if (defined $nl->get_value('prescribed_aero_file')) {
 my $megan_emis = defined $nl->get_value('megan_specifier');
 if ( $megan_emis ) { add_default($nl, 'megan_factors_file'); }
 
-# Aerosol convective processes
-if ($chem =~ /trop_strat/) {
-    add_default($nl, 'convproc_do_aer', 'val'=>'.true.');
-    add_default($nl, 'convproc_do_evaprain_atonce', 'val'=>'.true.');
-    add_default($nl, 'convproc_pom_spechygro', 'val'=>'0.2D0');
-    add_default($nl, 'convproc_wup_max', 'val'=>'4.0D0');
-}
-
 # Tropospheric full chemistry options
 if (($chem =~ /trop_mozart/ or $chem =~ /trop_strat/ or $chem =~ /waccm_tsmlt/) and ($phys !~ /cam6/)) {
 
@@ -2845,6 +2837,14 @@ if (($chem ne 'none') and ($chem ne 'terminator')) {
 # Deep convection scheme
 add_default($nl, 'deep_scheme');
 
+# Aerosol convective processes
+if ($phys =~ /cam6/ and $nl->get_value('deep_scheme') =~ /ZM/) {
+    add_default($nl, 'convproc_do_aer', 'val'=>'.true.');
+    add_default($nl, 'convproc_do_evaprain_atonce', 'val'=>'.true.');
+    add_default($nl, 'convproc_pom_spechygro', 'val'=>'0.2D0');
+    add_default($nl, 'convproc_wup_max', 'val'=>'4.0D0');
+}
+
 # Radiation scheme
 add_default($nl, 'radiation_scheme', 'val'=>$rad_pkg);
 
@@ -3695,6 +3695,11 @@ if ($dyn =~ /mpas/) {
     add_default($nl, 'mpas_h_ScaleWithMesh');
     add_default($nl, 'mpas_zd');
     add_default($nl, 'mpas_xnutr');
+    add_default($nl, 'mpas_cam_coef');
+    add_default($nl, 'mpas_print_detailed_minmax_vel');
+    add_default($nl, 'mpas_rayleigh_damp_u');
+    add_default($nl, 'mpas_rayleigh_damp_u_timescale_days');
+    add_default($nl, 'mpas_number_rayleigh_damp_u_levels');
     add_default($nl, 'mpas_do_restart');
     add_default($nl, 'mpas_print_global_minmax_vel');
     add_default($nl, 'mpas_print_detailed_minmax_vel');
@@ -3706,21 +3711,6 @@ if ($dyn =~ /mpas/) {
         add_default($nl, 'mpas_block_decomp_file_prefix');
     }
 
-    # invoke MPAS utility to generate streams files
-    my $mpas_libdir = $cfg->get('mpas_libdir');
-
-    # Check that the executable file streams_gen is present.  streams_gen is built
-    # at the same time as the MPAS library.  This allows build-namelist
-    # to be called before the MPAS library is built (via CESM scripts).
-    if ( -x "$mpas_libdir/streams_gen") {
-
-        my $cmnd = "$mpas_libdir/streams_gen $mpas_libdir/Registry_processed.xml ".
-               "streams.atmosphere stream_list.atmosphere. listed ";
-
-        system($cmnd) == 0 or die
-            "$ProgName - ERROR: generating MPAS streams files via command:\n".
-            "$cmnd";
-    }
 }
 
 # Defaults for history output
