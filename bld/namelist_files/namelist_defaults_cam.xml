@@ -48,8 +48,6 @@
 <ncdata hgrid="mpasa120" nlev="32" analytic_ic="1" >atm/cam/inic/mpas/mpasa120_L32_notopo_coords_c201216.nc</ncdata>
 <ncdata hgrid="mpasa120" nlev="32" analytic_ic="1" phys="cam6" >atm/cam/inic/mpas/mpasa120_L32_topo_coords_c201022.nc</ncdata>
 <ncdata hgrid="mpasa120" nlev="32" analytic_ic="1" phys="cam_dev" >atm/cam/inic/mpas/mpasa120_L32_topo_coords_c201022.nc</ncdata>
-<ncdata hgrid="mpasa60"  nlev="32" analytic_ic="1" >atm/cam/inic/mpas/mpasa60_L32_notopo_coords_c230707.nc</ncdata>
-<ncdata hgrid="mpasa30"  nlev="32" analytic_ic="1" >atm/cam/inic/mpas/mpasa30_L32_notopo_coords_c230707.nc</ncdata>
 
 <!-- Files with initial conditions -->
 <ncdata dyn="fv"  hgrid="0.23x0.31" nlev="26" ic_ymd="101"      >atm/cam/inic/fv/cami_0000-01-01_0.23x0.31_L26_c100513.nc</ncdata>
@@ -125,7 +123,7 @@
 <ncdata dyn="se" hgrid="ne0np4CONUS.ne30x8" nlev="32" chem="trop_strat_mam4_vbs">atm/cam/inic/se/f.e22.FCnudged.ne0CONUSne30x8_ne0CONUSne30x8_mt12.cam6_2_032.002.cam.i.2013-01-01-00000_c200623.nc</ncdata>
 <ncdata dyn="se" hgrid="ne0np4CONUS.ne30x8" nlev="32" chem="trop_strat_mam5_vbs">atm/cam/inic/se/f.e22.FCnudged.ne0CONUSne30x8_ne0CONUSne30x8_mt12.cam6_2_032.002.cam.i.2013-01-01-00000_c200623.nc</ncdata>
 <ncdata dyn="se" hgrid="ne30np4" nlev="58" chem="trop_strat_mam5_vbs">atm/cam/inic/se/f.e22.FCnudged.ne30_ne30_mg17.release-cesm2.2.0_spinup.2010_2020.001.cam.i.2011-01-01-00000_L58_c220310.nc</ncdata>
-<ncdata dyn="se" hgrid="ne30np4" nlev="93" chem="trop_strat_mam5_vbs">atm/cam/inic/se/f.cam6_3_112.FCMTHIST_v0c.ne30.non-ogw-ubcT-effgw0.7.001.cam.i.1998-01-01-00000_c230810.nc</ncdata>
+<ncdata dyn="se" hgrid="ne30np4" nlev="93" chem="trop_strat_mam5_vbs">atm/cam/inic/se/FCMTHIST_ne30pg3_1980-01-01_c221214.nc</ncdata>
 
 <ncdata dyn="se" hgrid="ne30np4" npg="3" nlev="58">atm/cam/inic/se/FLT_L58_ne30pg3_IC_c220623.nc</ncdata>
 <ncdata dyn="se" hgrid="ne30np4" npg="3" nlev="93">atm/cam/inic/se/cam7_FMT_ne30pg3_mg17_L93_c221118.nc</ncdata>
@@ -140,8 +138,6 @@
 <ncdata dyn="fv"  hgrid="1.9x2.5"   nlev="70"  aquaplanet="1" ic_ymd="20000101" >atm/waccm/ic/aqua.cam6.waccmsc_1.9x2.5_L70.2000-01-01.c170123.nc</ncdata>
 <ncdata dyn="fv"  hgrid="1.9x2.5"   nlev="70"  aquaplanet="1" ic_ymd="20000101" chem="waccm_tsmlt_mam4">atm/waccm/ic/aqua.waccm_tsmlt_1.9x2.5_L70_c170814.nc</ncdata>
 <ncdata dyn="fv"  hgrid="1.9x2.5"   nlev="70"  aquaplanet="1" ic_ymd="20000101" chem="waccm_ma_mam4">atm/waccm/ic/aqua.waccm_tsmlt_1.9x2.5_L70_c170814.nc</ncdata>
-<ncdata dyn="se"  hgrid="ne5np4"    nlev="70"  aquaplanet="1" chem="waccm_ma_mam4">atm/waccm/ic/aqua_waccm_ma_ne5np4_70L_c220729.nc</ncdata>
-<ncdata dyn="se"  hgrid="ne5np4"    nlev="70"  aquaplanet="1" chem="waccm_ma_mam5">atm/waccm/ic/aqua_waccm_ma_ne5np4_70L_c220729.nc</ncdata>
 <ncdata dyn="fv"  hgrid="4x5"       nlev="70"   ic_ymd="20000101" >atm/waccm/ic/f2000.waccm-mam3_4x5_L70.cam2.i.0017-01-01.c121113.nc</ncdata>
 <ncdata dyn="fv"  hgrid="10x15"     nlev="70"   ic_ymd="20000101" >atm/waccm/ic/f2000.waccm-mam3_10x15_L70.cam2.i.0017-01-01.c141016.nc</ncdata>
 <ncdata dyn="fv"  hgrid="1.9x2.5"   nlev="70"   ic_ymd="18500101" >atm/waccm/ic/b1850.waccm-mam3_1.9x2.5_L70.cam2.i.0156-01-01.c120523.nc</ncdata>
@@ -268,7 +264,7 @@
 <ncdata dyn="se" hgrid="ne5np4"   nlev="66"           ic_ymd="101">atm/waccm/ic/wa3_ne5np4_1950_spinup.cam2.i.1960-01-01-00000_c150810.nc</ncdata>
 <ncdata dyn="se" hgrid="ne30np4"  nlev="70"           ic_ymd="101">atm/waccm/ic/FW2000_ne30_L70_01-01-0001_c200602.nc</ncdata>
 <ncdata dyn="se" hgrid="ne30np4"  nlev="70"  npg="3" chem="waccm_sc_mam4">atm/waccm/ic/FWsc2000climo_ne30pg3_L70_0002-01-01_c221103.nc</ncdata>
-<ncdata dyn="se" hgrid="ne30np4"  nlev="70"  npg="3"  ic_ymd="101">atm/waccm/ic/FW2000.ne30pg3_ne30pg3_nlev70_c230906.nc</ncdata>
+<ncdata dyn="se" hgrid="ne30np4"  nlev="70"  npg="3"  ic_ymd="101">atm/waccm/ic/FW2000_ne30pg3_L70_01-01-0001_c200602.nc</ncdata>
 <ncdata dyn="se" hgrid="ne30np4"  nlev="110"          ic_ymd="101">atm/waccm/ic/FWsc2000_ne30pg3_L110_01-01-0001_c200521.nc</ncdata>
 
 <ncdata dyn="se" hgrid="ne0np4CONUS.ne30x8"       nlev="70" ic_ymd="101">atm/waccm/ic/FW2000_CONUS_30x8_L70_01-01-0001_c200602.nc</ncdata>
@@ -2119,9 +2115,7 @@
 <clubb_tridiag_solve_method                       > 1       </clubb_tridiag_solve_method>
 <clubb_up2_sfc_coef                               > 2.0     </clubb_up2_sfc_coef>
 <clubb_wpxp_L_thresh                              > 60.0    </clubb_wpxp_L_thresh>
-<do_hb_above_clubb                                >.false.  </do_hb_above_clubb>
-<do_hb_above_clubb phys="cam_dev"                 >.true.   </do_hb_above_clubb>
-<do_hb_above_clubb phys="cam6"                    >.true.   </do_hb_above_clubb>
+
 <!-- SILHS options -->
 <clubb_do_icesuper                      silhs="1" > .true.  </clubb_do_icesuper>
 <clubb_C2rt                             silhs="1" > 0.2     </clubb_C2rt>
@@ -2773,7 +2767,6 @@
 <zmconv_org                                                           > .false. </zmconv_org>
 <zmconv_org                                        zmconv_org="1"     > .true.  </zmconv_org>
 
-<zmconv_microp                                                        > .false. </zmconv_microp>
 <zmconv_num_cin                                                       > 5       </zmconv_num_cin>
 <zmconv_num_cin                                       phys="cam6"     > 1       </zmconv_num_cin>
 <zmconv_num_cin                                       phys="cam_dev"  > 1       </zmconv_num_cin>
@@ -3015,8 +3008,6 @@
 <!-- Defaults for SE                                                    -->
 <!-- ================================================================== -->
 
-<se_pgf_formulation>           1</se_pgf_formulation>
-<se_pgf_formulation waccmx="1">2</se_pgf_formulation>
 <se_ftype> 2 </se_ftype>
 
 <se_large_Courant_incr        > .true.  </se_large_Courant_incr>
@@ -3123,8 +3114,6 @@
 <mpas_time_integration_order  > 2 </mpas_time_integration_order>
 <mpas_dt                      > 1800.0D0 </mpas_dt>
 <mpas_dt hgrid="mpasa120"     >  900.0D0 </mpas_dt>
-<mpas_dt hgrid="mpasa60"      >  450.0D0 </mpas_dt>
-<mpas_dt hgrid="mpasa30"      >  225.0D0 </mpas_dt>
 
 <mpas_split_dynamics_transport>.true.</mpas_split_dynamics_transport>
 <mpas_number_of_sub_steps     > 2 </mpas_number_of_sub_steps>
@@ -3139,8 +3128,6 @@
 
 <mpas_len_disp hgrid="mpasa480">480000.0D0</mpas_len_disp>
 <mpas_len_disp hgrid="mpasa120">120000.0D0</mpas_len_disp>
-<mpas_len_disp hgrid="mpasa60">  60000.0D0</mpas_len_disp>
-<mpas_len_disp hgrid="mpasa30">  30000.0D0</mpas_len_disp>
 
 <mpas_visc4_2dsmag            > 0.05D0 </mpas_visc4_2dsmag>
 <mpas_del4u_div_factor        > 10.0D0 </mpas_del4u_div_factor>
