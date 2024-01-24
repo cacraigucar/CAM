@@ -11,7 +11,7 @@ module zm_conv_intr
    use physconst,    only: cpair
    use ppgrid,       only: pver, pcols, pverp, begchunk, endchunk
    use zm_conv,      only: zm_conv_evap, zm_convr, convtran, momtran
-   
+
    use zm_microphysics,  only: zm_aero_t, zm_conv_t
    use rad_constituents, only: rad_cnst_get_info, rad_cnst_get_mode_num, rad_cnst_get_aer_mmr, &
                                rad_cnst_get_aer_props, rad_cnst_get_mode_props !, &
@@ -233,7 +233,7 @@ subroutine zm_conv_readnl(nlfile)
    call mpi_bcast(zmconv_capelmt,           1, mpi_real8, masterprocid, mpicom, ierr)
    if (ierr /= 0) call endrun("zm_conv_readnl: FATAL: mpi_bcast: zmconv_capelmt")
    call mpi_bcast(zmconv_parcel_pbl,        1, mpi_logical, masterprocid, mpicom, ierr)
-   if (ierr /= 0) call endrun("zm_conv_readnl: FATAL: mpi_bcast: zmconv_parcel_pbl") 
+   if (ierr /= 0) call endrun("zm_conv_readnl: FATAL: mpi_bcast: zmconv_parcel_pbl")
    call mpi_bcast(zmconv_tau,               1, mpi_real8, masterprocid, mpicom, ierr)
    if (ierr /= 0) call endrun("zm_conv_readnl: FATAL: mpi_bcast: zmconv_tau")
 
@@ -656,13 +656,15 @@ subroutine zm_conv_tend(pblh    ,mcon    ,cme     , &
 
    call zm_convr(   lchnk   ,ncol    , &
                     state%t       ,state%q(:,:,1),      prec    ,jctop   ,jcbot   , &
-                    pblh    ,state%zm      ,state%phis    ,state%zi      ,ptend_loc%q(:,:,1)    , &
+                    pblh    ,state%zm      ,state%phis    ,state%zi      ,ww1, ww2, ptend_loc%q(:,:,1)    , &
                     ptend_loc%s    , state%pmid     ,state%pint    ,state%pdel     , &
+                    yy1, yy2, yy3, &
                     .5_r8*ztodt    ,mcon    ,cme     , cape,      &
                     tpert   ,dlf     ,pflx    ,zdu     ,rprd    , &
                     mu,      md,      du,      eu,      ed,       &
                     dp,      dsubcld, jt,      maxg,    ideep,    &
-                    ql,  rliq, landfrac,                          &
+                    ql,  rliq, xx1, xx2, landfrac,                          &
+                    zz1, zz2, &
                     org, orgt, zm_org2d,  &
                     dif, dnlf, dnif,  conv, &
                     aero(lchnk), rice)
