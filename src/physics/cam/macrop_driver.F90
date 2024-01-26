@@ -395,7 +395,8 @@ end subroutine macrop_driver_readnl
   !                                                         !
   !-------------------------------------------------------- !
 
-  use cloud_fraction,   only: cldfrc, cldfrc_fice
+  use cloud_fraction,   only: cldfrc
+  use cldfrc_mod,       only: cldfrc_fice
   use physics_types,    only: physics_state, physics_ptend
   use physics_types,    only: physics_ptend_init, physics_update
   use physics_types,    only: physics_ptend_sum,  physics_state_copy
@@ -872,7 +873,7 @@ end subroutine macrop_driver_readnl
    fice(:,:) = 0._r8
    fsnow(:,:) = 0._r8
 !REMOVECAM_END
-   call cldfrc_fice( ncol, state_loc%t(:ncol,:), fice(:ncol,:), fsnow(:ncol,:) )
+   call cldfrc_fice( ncol, pver, tmelt, state_loc%t(:ncol,:), fice(:ncol,:), fsnow(:ncol,:) )
 
 
    lq(:)        = .FALSE.
