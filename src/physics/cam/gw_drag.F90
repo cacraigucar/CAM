@@ -1868,6 +1868,11 @@ subroutine gw_tend(state, pbuf, dt, ptend, cam_in, flx_heat)
         end do
      end do
 
+     ! Find momentum flux, and use it to fix the wind tendencies below
+     ! the gravity wave region.
+     call momentum_flux(tend_level, taucd, um_flux, vm_flux)
+     call momentum_fixer(tend_level, p, um_flux, vm_flux, utgw, vtgw)
+
       ! Add the momentum tendencies to the output tendency arrays.
      do k = 1, pver
         ptend%u(:ncol,k) = ptend%u(:ncol,k) + utgw(:,k)
