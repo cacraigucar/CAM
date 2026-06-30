@@ -271,6 +271,7 @@ cat > ${submit_script_cime} << EOF
 #PBS -l walltime=$wallclock_limit
 #PBS -l select=1:ncpus=128:mpiprocs=128
 #PBS -j oe
+#PBS -l job_priority=premium
 
 EOF
 

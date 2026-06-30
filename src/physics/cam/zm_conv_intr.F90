@@ -40,6 +40,12 @@ module zm_conv_intr
       zm_conv_tend,               &! return tendencies
       zm_conv_tend_2               ! return tendencies
 
+  !++ MCSP
+  public :: ttend_s
+
+  real(r8) :: ttend_s(pcols,pver)
+  !-- MCSP
+
    public zmconv_ke, zmconv_ke_lnd  ! needed by convect_shallow
 
    integer ::& ! indices for fields in the physics buffer
@@ -593,6 +599,10 @@ subroutine zm_conv_tend(pblh    ,mcon    ,cme     , &
    end do
 
    call outfld('CAPE', cape, pcols, lchnk)        ! RBN - CAPE output
+
+   !++ MCSP
+   ttend_s = ptend_loc%s(:pcols,:)
+   !-- MCSP
 !
 ! Output fractional occurance of ZM convection
 !
