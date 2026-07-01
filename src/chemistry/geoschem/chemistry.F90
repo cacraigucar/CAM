@@ -21,6 +21,9 @@ module chemistry
   use string_utils,        only : to_upper
 #if defined( MODAL_AERO )
   use modal_aero_data,     only : ntot_amode
+  use aerosol_properties_mod, only: aerosol_properties
+  use aerosol_instances_mod, only: aerosol_instances_get_props, &
+       aerosol_instances_get_num_models
 #endif
 
   ! GEOS-Chem derived types
@@ -169,6 +172,9 @@ module chemistry
   ! for nitrogen deposition fluxes to surface models
   logical, parameter :: chem_has_ndep_flx = .false.
 
+#if defined( MODAL_AERO )
+  class(aerosol_properties), pointer :: aero_props=>null()
+#endif
 contains
 
   !================================================================================================
@@ -202,7 +208,7 @@ contains
     use aero_model,          only : aero_model_register
     use modal_aero_data,     only : nspec_max
     use modal_aero_data,     only : ntot_amode, nspec_amode
-    use rad_constituents,    only : rad_cnst_get_info
+    use radiative_aerosol,    only : rad_aer_get_info
 #endif
 
     ! GEOS-Chem interface modules in CAM
@@ -578,7 +584,7 @@ contains
 
     DO M = 1, ntot_amode
        DO L = 1, nspec_amode(M)
-          call rad_cnst_get_info(0,M,L,spec_name=aername)
+          call rad_aer_get_info(0,M,L,spec_name=aername)
           SELECT CASE ( to_upper(aername(:3)) )
              CASE ( 'BC_' )
                 SELECT CASE ( to_upper(aername(4:5)) )
@@ -1042,6 +1048,7 @@ contains
     INTEGER                :: I, J, L, N, M
     INTEGER                :: RC
     INTEGER                :: nLinoz
+    integer                :: iaermod
 
     ! Logicals
     LOGICAL                :: prtDebug
@@ -1573,8 +1580,14 @@ contains
     ENDIF
 
 #if defined( MODAL_AERO )
+    ! retrieve MAM aerosol properties from aerosol instances
+    do iaermod = 1, aerosol_instances_get_num_models()
+       aero_props => aerosol_instances_get_props(iaermod, 0)
+       if (aero_props%model_is('MAM')) exit
+    end do
+
     ! Initialize aqueous chem
-    CALL SOx_inti()
+    CALL SOx_inti(aero_props)
 
     ! Initialize aerosols
     CALL aero_model_init( pbuf2d )
@@ -1937,7 +1950,7 @@ contains
     use phys_grid,           only : get_ncols_p, get_rlat_all_p, get_rlon_all_p
     use phys_grid,           only : get_area_all_p, get_lat_all_p, get_lon_all_p
     use physconst,           only : MWDry, Gravit
-    use rad_constituents,    only : rad_cnst_get_info
+    use radiative_aerosol,    only : rad_aer_get_info
     use short_lived_species, only : get_short_lived_species_gc, set_short_lived_species_gc
     use spmd_utils,          only : masterproc
     use time_manager,        only : Get_Curr_Calday, Get_Curr_Date ! For computing SZA
@@ -2344,7 +2357,7 @@ contains
           if (usePrescribedAerDistribution) then
              ! do not zero out sulfate aerosol here since aerosol distribution for sulfate
              ! will be prescribed (hplin, 5/9/23)
-             call rad_cnst_get_info(0,M,SM,spec_name=aerName)
+             call rad_aer_get_info(0,M,SM,spec_name=aerName)
              IF ( to_upper(aerName(:3)) == "SO4" ) CYCLE
           end if
 
@@ -2366,7 +2379,7 @@ contains
           if (usePrescribedAerDistribution) then
              ! do not zero out sulfate aerosol here since aerosol distribution for sulfate
              ! will be prescribed (hplin, 5/9/23)
-             call rad_cnst_get_info(0,M,SM,spec_name=aerName)
+             call rad_aer_get_info(0,M,SM,spec_name=aerName)
              IF ( to_upper(aerName(:3)) == "SO4" ) CYCLE
           end if
 
